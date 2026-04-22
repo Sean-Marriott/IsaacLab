@@ -90,7 +90,7 @@ def root_pos_w(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg(
 
 
 @generic_io_descriptor(
-    units="unit", axes=["W", "X", "Y", "Z"], observation_type="RootState", on_inspect=[record_shape, record_dtype]
+    units="unit", axes=["X", "Y", "Z", "W"], observation_type="RootState", on_inspect=[record_shape, record_dtype]
 )
 def root_quat_w(
     env: ManagerBasedEnv, make_quat_unique: bool = False, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
