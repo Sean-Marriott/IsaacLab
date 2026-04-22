@@ -412,3 +412,43 @@ class NavigationAction(ThrustAction):
 
         self._commands[env_ids] = 0.0
         self._prev_commands[env_ids] = 0.0
+
+
+class DirectVelocityAction(NavigationAction):
+    """Action term that passes body-frame velocity commands directly to the Lee controller.
+
+    Unlike :class:`NavigationAction`, there is no polar re-parameterisation. The policy
+    outputs four values in ``[-1, 1]`` that are linearly scaled:
+
+    - ``action[0]`` → ``vx`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[1]`` → ``vy`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[2]`` → ``vz`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[3]`` → ``yaw_rate`` in ``[-max_yaw_rate, max_yaw_rate]`` [rad/s]
+
+    This lets the policy discover the coupling between translational axes itself,
+    rather than having it encoded into the action parameterisation.
+    """
+
+    cfg: thrust_actions_cfg.DirectVelocityActionCfg
+
+    @property
+    def action_dim(self) -> int:
+        return 4
+
+    def apply_actions(self):
+        clamped = torch.clamp(self.processed_actions, min=-1.0, max=1.0)
+
+        processed_actions = torch.zeros(self.num_envs, 4, device=self.device)
+        processed_actions[:, 0] = clamped[:, 0] * self.cfg.max_velocity
+        processed_actions[:, 1] = clamped[:, 1] * self.cfg.max_velocity
+        processed_actions[:, 2] = clamped[:, 2] * self.cfg.max_velocity
+        processed_actions[:, 3] = clamped[:, 3] * self.cfg.max_yaw_rate
+
+        if not self._has_actions_updated:
+            self._prev_commands[:] = self._commands
+            self._commands[:] = processed_actions
+            self._has_actions_updated = True
+
+        wrench_command = self._lc.compute(processed_actions)
+        thrust_commands = wrench_command @ self._allocation_pinv.T
+        self._asset.set_thrust_target(thrust_commands, thruster_ids=self._thruster_ids)

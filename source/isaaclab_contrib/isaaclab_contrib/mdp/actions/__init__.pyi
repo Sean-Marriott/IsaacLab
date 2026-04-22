@@ -6,9 +6,11 @@
 __all__ = [
     "ThrustAction",
     "NavigationAction",
+    "DirectVelocityAction",
     "ThrustActionCfg",
     "NavigationActionCfg",
+    "DirectVelocityActionCfg"
 ]
 
-from .thrust_actions import NavigationAction, ThrustAction
-from .thrust_actions_cfg import NavigationActionCfg, ThrustActionCfg
+from .thrust_actions import NavigationAction, ThrustAction, DirectVelocityAction
+from .thrust_actions_cfg import NavigationActionCfg, ThrustActionCfg, DirectVelocityActionCfg

@@ -13,7 +13,7 @@ from isaaclab.utils import configclass
 if TYPE_CHECKING:
     from isaaclab_contrib.controllers import LeeAccControllerCfg, LeePosControllerCfg, LeeVelControllerCfg
 
-    from .thrust_actions import NavigationAction, ThrustAction
+    from .thrust_actions import DirectVelocityAction, NavigationAction, ThrustAction
 
 
 @configclass
@@ -205,3 +205,31 @@ class NavigationActionCfg(ThrustActionCfg):
 
     max_inclination_angle: float = MISSING
     """Maximum inclination angle [rad] for position, velocity and acceleration lee geometric controller."""
+
+@configclass
+class DirectVelocityActionCfg(ThrustActionCfg):
+    """Configuration for the direct velocity action term.
+
+    Unlike :class:`NavigationActionCfg`, this action term passes velocity commands
+    directly to the Lee controller without any polar re-parameterisation. The policy
+    outputs four values in ``[-1, 1]`` that are linearly scaled to body-frame velocity
+    and yaw-rate setpoints:
+
+    - ``action[0]`` → ``vx`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[1]`` → ``vy`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[2]`` → ``vz`` in ``[-max_velocity, max_velocity]`` [m/s]
+    - ``action[3]`` → ``yaw_rate`` in ``[-max_yaw_rate, max_yaw_rate]`` [rad/s]
+
+    See :class:`DirectVelocityAction` for more details.
+    """
+
+    class_type: type[DirectVelocityAction] | str = "{DIR}.thrust_actions:DirectVelocityAction"
+
+    controller_cfg: LeeVelControllerCfg = MISSING
+    """The configuration for the Lee velocity controller."""
+
+    max_velocity: float = MISSING
+    """Maximum translational velocity command [m/s]."""
+
+    max_yaw_rate: float = MISSING
+    """Maximum yaw rate command [rad/s]."""
