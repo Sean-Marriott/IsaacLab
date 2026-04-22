@@ -32,6 +32,8 @@ from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
     distance_to_goal_exp,
     lin_vel_xyz_exp,
     yaw_aligned,
+    distance_to_goal_tanh,
+    distance_to_goal_l2
 )
 
 
@@ -117,7 +119,7 @@ class ObservationsCfg:
         last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
 
         def __post_init__(self):
-            self.enable_corruption = False
+            self.enable_corruption = True
             self.concatenate_terms = True
 
     # observation groups
@@ -133,10 +135,10 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {
-                "x": (-1.0, 1.0),
-                "y": (-1.0, 1.0),
-                "z": (-1.0, 1.0),
-                "yaw": (-math.pi / 6.0, math.pi / 6.0),
+                "x": (-2.0, 2.0),
+                "y": (-2.0, 2.0),
+                "z": (-2.0, 2.0),
+                "yaw": (-math.pi, math.pi),
                 "roll": (-math.pi / 6.0, math.pi / 6.0),
                 "pitch": (-math.pi / 6.0, math.pi / 6.0),
             },
@@ -167,12 +169,20 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    distance_to_goal_exp = RewTerm(
-        func=distance_to_goal_exp,
-        weight=25.0,
+    distance_to_goal_l2 = RewTerm(
+        func=distance_to_goal_l2,
+        weight=-1.0,  # negative weight — penalise distance
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "std": 1.5,
+            "command_name": "target_pose",
+        },
+    )
+    distance_to_goal_tanh = RewTerm(
+        func=distance_to_goal_tanh,
+        weight=10.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.1,
             "command_name": "target_pose",
         },
     )
@@ -183,7 +193,7 @@ class RewardsCfg:
     )
     yaw_aligned = RewTerm(
         func=yaw_aligned,
-        weight=2.0,
+        weight=5.0,
         params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
     )
     lin_vel_xyz_exp = RewTerm(
@@ -210,8 +220,9 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    crash = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -3.0})
-
+    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -3.0})
+    crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 3.0})
+    
 
 ##
 # Environment configuration
@@ -238,7 +249,7 @@ class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         self.decimation = 10
-        self.episode_length_s = 5.0
+        self.episode_length_s = 10.0
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
         self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(

@@ -286,5 +286,6 @@ from .terminations import (
     joint_vel_out_of_limit,
     joint_vel_out_of_manual_limit,
     root_height_below_minimum,
+    root_height_above_maximum,
     time_out,
 )

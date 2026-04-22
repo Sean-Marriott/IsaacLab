@@ -23,6 +23,68 @@ if TYPE_CHECKING:
 Drone control rewards.
 """
 
+def distance_to_goal_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "target_pose",
+) -> torch.Tensor:
+    """Penalize tracking of the position error using L2-norm.
+    
+    The function computes the position error between the commanded target position 
+    and the asset (robot) root position.
+    
+    Args:
+        env: The manager-based RL environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+        command_name: Name of the command to read the target pose from the
+            environment's command manager. The function expects the command
+            tensor to contain positions in its first three columns.
+            
+    Returns:
+        A 1-D tensor of shape (num_envs,) containing the per-environment distance
+        errors to be combined with a penalty i.e. negative weight.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
+    # compute the error
+    position_error = torch.norm(command[:, :3] - current_position, dim=1)
+    return position_error
+
+def distance_to_goal_tanh(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    std: float = 1.0,
+    command_name: str = "target_pose",
+) -> torch.Tensor:
+    """Reward the distance to a goal using a tanh kernel.
+    
+    The function computes the position error between the commanded target position and the asset (robot) root position
+    and maps it with a tanh kernel.
+
+    Args:
+        env: The manager-based RL environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+        std: Scaling parameter for the tanh kernel. Controls the distance at which
+            the reward transitions from high to low — smaller values produce a
+            sharper falloff concentrated near the goal, larger values spread the
+            gradient over a wider range.
+        command_name: Name of the command to read the target pose from the
+            environment's command manager. The function expects the command
+            tensor to contain positions in its first three columns.
+
+    Returns:
+        A 1-D tensor of shape (num_envs,) containing the per-environment reward
+        values in [0, 1], with 1.0 when the position error is zero.    
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
+    # compute the error
+    position_error = torch.norm(command[:, :3] - current_position, dim=1)
+    return 1 - torch.tanh(position_error / std)
 
 def distance_to_goal_exp(
     env: ManagerBasedRLEnv,
