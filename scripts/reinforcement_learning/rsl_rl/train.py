@@ -174,6 +174,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             from isaaclab.envs import multi_agent_to_single_agent
 
             env = multi_agent_to_single_agent(env)
+            
+        resume_path = None
 
         # save resume path before creating a new log_dir
         if args_cli.checkpoint:
@@ -205,6 +207,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
         # write git state to logs
         runner.add_git_repo_to_log(__file__)
+                
         # load the checkpoint
         if resume_path:
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
