@@ -14,6 +14,7 @@ import platform
 import sys
 import time
 from datetime import datetime
+from isaaclab.utils.assets import retrieve_file_path
 
 import gymnasium as gym
 import torch
@@ -175,8 +176,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env = multi_agent_to_single_agent(env)
 
         # save resume path before creating a new log_dir
-        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if args_cli.checkpoint:
+            resume_path = retrieve_file_path(args_cli.checkpoint)
 
         # wrap for video recording
         if args_cli.video:
@@ -205,7 +206,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # write git state to logs
         runner.add_git_repo_to_log(__file__)
         # load the checkpoint
-        if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+        if resume_path:
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
             # load previously trained model
             runner.load(resume_path)
