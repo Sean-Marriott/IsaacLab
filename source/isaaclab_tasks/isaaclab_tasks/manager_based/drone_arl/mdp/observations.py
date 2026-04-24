@@ -69,7 +69,117 @@ def base_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntit
 """
 Sensors
 """
+def lidar_scan(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Lidar ranges from the given sensor.
 
+    This returns per-ray distances [m] from the sensor origin to hit points in world frame.
+    Rays without a valid hit are set to the sensor maximum distance.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        normalize: If True, scale ranges by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Per-ray lidar ranges. Shape is (num_envs, num_rays).
+    """
+    # extract the used quantities (to enable type-hinting)
+    sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+
+    # Compute Euclidean range to each hit point.
+    ray_vectors_w = sensor.data.ray_hits_w - sensor.data.pos_w.unsqueeze(1)
+    ranges = torch.linalg.norm(ray_vectors_w, dim=-1)
+
+    # Replace invalid hits (inf/nan) with max distance.
+    max_distance = float(sensor.cfg.max_distance)
+    ranges = torch.nan_to_num(ranges, nan=max_distance, posinf=max_distance, neginf=0.0)
+    ranges = torch.clamp(ranges, min=0.0, max=max_distance)
+
+    if normalize:
+        return ranges / max_distance
+    return ranges
+
+
+def lidar_min_distance(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Minimum lidar range (closest obstacle) from the given sensor.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        normalize: If True, scale distance by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Minimum range per environment. Shape is (num_envs, 1).
+    """
+    # Reuse range computation from lidar_scan to keep behavior consistent.
+    ranges = lidar_scan(env=env, sensor_cfg=sensor_cfg, normalize=False)
+    min_range = torch.min(ranges, dim=1, keepdim=True).values
+
+    if normalize:
+        sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+        max_distance = float(sensor.cfg.max_distance)
+        return min_range / max_distance
+    return min_range
+
+
+def lidar_sector_min_distances(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    num_sectors: int = 8,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Directional lidar feature using minimum range per azimuth sector.
+
+    Rays are grouped by their azimuth angle in the sensor frame. For each sector,
+    this returns the minimum hit distance [m]. This preserves directional obstacle
+    information with a compact observation size.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        num_sectors: Number of uniform azimuth sectors spanning [-pi, pi].
+        normalize: If True, scale ranges by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Sector-wise minimum distances. Shape is (num_envs, num_sectors).
+    """
+    if num_sectors <= 0:
+        raise ValueError("num_sectors must be positive.")
+
+    sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+    ranges = lidar_scan(env=env, sensor_cfg=sensor_cfg, normalize=False)
+
+    # Ray directions are defined in the sensor frame and repeated across envs.
+    ray_directions = sensor.ray_directions[0]
+    azimuth = torch.atan2(ray_directions[:, 1], ray_directions[:, 0])
+
+    max_distance = float(sensor.cfg.max_distance)
+    sector_mins = torch.full((env.num_envs, num_sectors), max_distance, device=env.device)
+
+    # Uniform azimuth partition in [-pi, pi].
+    bin_edges = torch.linspace(-torch.pi, torch.pi, num_sectors + 1, device=env.device)
+    for sector_idx in range(num_sectors):
+        start_angle = bin_edges[sector_idx]
+        end_angle = bin_edges[sector_idx + 1]
+        if sector_idx == num_sectors - 1:
+            in_sector = (azimuth >= start_angle) & (azimuth <= end_angle)
+        else:
+            in_sector = (azimuth >= start_angle) & (azimuth < end_angle)
+
+        if in_sector.any():
+            sector_mins[:, sector_idx] = ranges[:, in_sector].amin(dim=1)
+
+    if normalize:
+        return sector_mins / max_distance
+    return sector_mins
 
 class ImageLatentObservation(ManagerTermBase):
     """Callable observation term that returns VAE latents from camera images.
@@ -129,8 +239,8 @@ class ImageLatentObservation(ManagerTermBase):
         super().__init__(cfg, env)
         self.camera_sensor: TiledCamera | Camera | RayCasterCamera | MultiMeshRayCasterCamera = env.scene.sensors[
             cfg.params["sensor_cfg"].name
-        ]
-        self.data_type: str = cfg.params["data_type"]
+        ] # type: ignore
+        self.data_type: str = cfg.params["data_type"] # type: ignore
         self.convert_perspective_to_orthogonal = bool(cfg.params.get("convert_perspective_to_orthogonal", False))
         self.normalize = bool(cfg.params.get("normalize", True))
 
@@ -280,3 +390,4 @@ def generated_drone_commands(
     current_position_b_dir = current_position_b / (torch.linalg.norm(current_position_b, dim=-1, keepdim=True) + 1e-8)
     current_position_b_mag = torch.linalg.norm(current_position_b, dim=-1, keepdim=True)
     return torch.cat((current_position_b_dir, current_position_b_mag), dim=-1)
+

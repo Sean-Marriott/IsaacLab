@@ -17,7 +17,7 @@ from isaaclab.managers import SceneEntityCfg
 from .curriculums import get_obstacle_curriculum_term
 
 if TYPE_CHECKING:
-    from isaaclab.assets import RigidObjectCollection
+    from isaaclab.assets import Articulation, RigidObject, RigidObjectCollection
     from isaaclab.envs import ManagerBasedRLEnv
 
 
@@ -162,7 +162,7 @@ def reset_obstacles_with_individual_ranges(
 
         # sample object positions
         num_active_envs = envs_need_obstacle.sum().item()
-        ratios = torch.rand(num_active_envs, 3, device=env.device)
+        ratios = torch.rand(int(num_active_envs), 3, device=env.device)
         positions = (ratios * (max_ratio - min_ratio) + min_ratio - 0.5) * env_size_t
         positions[:, 2] += ground_offset
 
@@ -187,3 +187,106 @@ def reset_obstacles_with_individual_ranges(
     # Write to sim
     obstacles.write_object_pose_to_sim(all_poses, env_ids=env_ids)
     obstacles.write_object_velocity_to_sim(all_velocities, env_ids=env_ids)
+
+
+def reset_single_obstacle(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    robot_cfg: SceneEntityCfg,
+    obstacle_cfg: SceneEntityCfg,
+    env_size: tuple[float, float, float],
+    pose_range: dict,
+    velocity_range: dict,
+    radius_min: float = 0.2,
+    radius_max: float = 0.5,
+    drone_offset_min: float = 1.0,
+    drone_offset_max: float = 2.0,
+) -> None:
+    obstacles: RigidObjectCollection = env.scene[obstacle_cfg.name]
+    num_objects = obstacles.num_objects
+    num_envs = len(env_ids)
+    object_names = obstacles.object_names
+
+    # Prepare tensors
+    all_poses = torch.zeros(num_envs, num_objects, 7, device=env.device)
+    all_velocities = torch.zeros(num_envs, num_objects, 6, device=env.device)
+
+    if "rod" not in object_names:
+        raise ValueError("reset_single_obstacle requires an object named 'rod' in the scene.")
+
+    rod_idx = object_names.index("rod")
+    env_origins = env.scene.env_origins[env_ids]
+
+    # Move all objects far below the scene by default.
+    all_poses[:, :, 0:3] = env_origins.unsqueeze(1) + torch.tensor([0.0, 0.0, -1000.0], device=env.device)
+    all_poses[:, :, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device)
+
+    # Sample a uniform random position in an XY ring (annulus) centered at each env origin.
+    env_radius_limit = 0.5 * min(env_size[0], env_size[1])
+    radius_min_m = radius_min * env_radius_limit
+    radius_max_m = radius_max * env_radius_limit
+    if radius_min_m < 0.0 or radius_max_m < 0.0:
+        raise ValueError("radius_min and radius_max must be non-negative.")
+    if radius_min_m > radius_max_m:
+        raise ValueError("radius_min must be less than or equal to radius_max.")
+
+    angles = 2.0 * torch.pi * torch.rand(num_envs, device=env.device)
+    radii = torch.sqrt(
+        torch.rand(num_envs, device=env.device) * (radius_max_m**2 - radius_min_m**2) + radius_min_m**2
+    )
+
+    positions = torch.zeros(num_envs, 3, device=env.device)
+    positions[:, 0] = radii * torch.cos(angles)
+    positions[:, 1] = radii * torch.sin(angles)
+    positions += env_origins
+
+    all_poses[:, rod_idx, 0:3] = positions
+    all_poses[:, rod_idx, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device).repeat(num_envs, 1)
+
+    # Write to sim
+    obstacles.write_object_pose_to_sim(all_poses, env_ids=env_ids)
+    obstacles.write_object_velocity_to_sim(all_velocities, env_ids=env_ids)
+
+    # Get vector from origin to obstacle (in env-local frame, XY plane)
+    # positions already includes env_origins, so subtract to get the local direction
+    obstacle_local_xy = positions[:, 0:2] - env_origins[:, 0:2]  # (num_envs, 2)
+    
+    # Sample how far past the obstacle to place the drone
+    drone_offsets = (
+        torch.rand(num_envs, device=env.device) * (drone_offset_max - drone_offset_min)
+        + drone_offset_min
+    )
+    
+    # Normalize — radii is guaranteed > 0 if radius_min > 0; guard anyway
+    directions = obstacle_local_xy / radii.unsqueeze(-1).clamp(min=1e-6)
+    
+    # Robot
+    robot: RigidObject | Articulation = env.scene[robot_cfg.name]
+    
+    # poses
+    range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+    ranges = torch.tensor(range_list, device=robot.device)
+    rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=robot.device)
+    
+    # Place drone on the vector from origin past the obstacle
+    drone_distance = radii + drone_offsets  # (num_envs,)
+    drone_positions = torch.zeros(num_envs, 3, device=env.device)
+    drone_positions[:, 0] = drone_distance * directions[:, 0]
+    drone_positions[:, 1] = drone_distance * directions[:, 1]
+    drone_positions[:, 2] = rand_samples[:, 2]
+    drone_positions += env_origins
+    
+    orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
+    drone_quat = torch.zeros(num_envs, 4, device=env.device)
+    drone_quat[:, 3] = 1
+    drone_quat = math_utils.quat_mul(drone_quat, orientations_delta)
+    drone_pose = torch.cat([drone_positions, drone_quat], dim=-1)
+    
+    # velocities
+    range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+    ranges = torch.tensor(range_list, device=robot.device)
+    rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=robot.device)
+    
+    drone_velocity = torch.zeros(num_envs, 6, device=env.device) + rand_samples
+    robot.write_root_pose_to_sim(drone_pose, env_ids=env_ids)
+    robot.write_root_velocity_to_sim(drone_velocity, env_ids=env_ids)
