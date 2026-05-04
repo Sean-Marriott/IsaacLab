@@ -91,7 +91,7 @@ MATRICE_THRUSTER = ThrusterCfg(
 
 MATRICE_CFG = MultirotorCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/sean/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/drone_arl/robots/M350.usd",
+        usd_path="/home/sean/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/drone_arl/robots/M350-chainsaw.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
