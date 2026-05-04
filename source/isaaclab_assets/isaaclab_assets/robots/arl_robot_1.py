@@ -73,3 +73,59 @@ ARL_ROBOT_1_CFG = MultirotorCfg(
         [-0.07, 0.07, -0.07, 0.07],
     ],
 )
+
+# DJI Matrice 350 RTK: 6.5 kg airframe.
+# Thrust model from rotor_constant=8.48e-5 N/(rad/s)², max_rotor_velocity=800 rad/s:
+#   k_f = 8.48e-5 × (2π)² = 3.35e-3 N/rps², hover at ~69 RPS (~4100 RPM), max ~54 N/motor.
+# Allocation uses the same sign pattern as ARL_ROBOT_1, scaled to M350 motor positions:
+#   back_left  (-0.3182,  0.3382), back_right  (-0.3182, -0.3382)
+#   front_left ( 0.3161,  0.3786), front_right ( 0.3161, -0.3786)
+MATRICE_THRUSTER = ThrusterCfg(
+    thrust_range=(0.5, 55.0),
+    thrust_const_range=(2.8e-3, 3.9e-3),
+    tau_inc_range=(0.05, 0.08),
+    tau_dec_range=(0.005, 0.005),
+    torque_to_thrust_ratio=0.05,
+    thruster_names_expr=["back_left_prop", "back_right_prop", "front_left_prop", "front_right_prop"],
+)
+
+MATRICE_CFG = MultirotorCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path="/home/sean/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/drone_arl/robots/M350.usd",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+    ),
+    init_state=MultirotorCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.0),
+        lin_vel=(0.0, 0.0, 0.0),
+        ang_vel=(0.0, 0.0, 0.0),
+        rot=(0.0, 0.0, 0.0, 1.0),
+        rps={
+            "back_left_prop": 69.0,
+            "back_right_prop": 69.0,
+            "front_left_prop": 69.0,
+            "front_right_prop": 69.0,
+        },
+    ),
+    actuators={"thrusters": MATRICE_THRUSTER},
+    rotor_directions=[-1, 1, -1, 1],
+    allocation_matrix=[
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [-0.3182, -0.3182, 0.3161, 0.3161],
+        [-0.3382, 0.3382, 0.3786, -0.3786],
+        [-0.05, 0.05, -0.05, 0.05],
+    ],
+)
