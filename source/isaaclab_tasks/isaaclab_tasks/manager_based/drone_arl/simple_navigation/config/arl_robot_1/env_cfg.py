@@ -8,6 +8,7 @@ from isaaclab.utils import configclass
 from isaaclab_assets.robots.arl_robot_1 import ARL_ROBOT_1_CFG
 
 from .simple_lidar_navigation_env_cfg import SimpleLidarNavigationEnvCfg
+from .simple_depth_latent_navigation_env_cfg import SimpleDepthLatentNavigationEnvCfg
 
 @configclass
 class LidarNavigationEnvCfg(SimpleLidarNavigationEnvCfg):
@@ -19,6 +20,22 @@ class LidarNavigationEnvCfg(SimpleLidarNavigationEnvCfg):
 
 @configclass
 class LidarNavigationEnvCfg_PLAY(LidarNavigationEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        
+@configclass
+class LatentDepthNavigationEnvCfg(SimpleDepthLatentNavigationEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = ARL_ROBOT_1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.actuators["thrusters"].dt = self.sim.dt
+
+
+@configclass
+class LatentDepthNavigationEnvCfg_PLAY(LatentDepthNavigationEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 50

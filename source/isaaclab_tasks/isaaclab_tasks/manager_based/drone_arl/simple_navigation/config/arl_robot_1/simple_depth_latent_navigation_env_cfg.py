@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-import logging
 import math
 from dataclasses import MISSING
 
@@ -12,7 +11,6 @@ from isaaclab_physx.physics import PhysxCfg
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -20,69 +18,62 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sensors.ray_caster.multi_mesh_ray_caster_camera_cfg import MultiMeshRayCasterCameraCfg
 from isaaclab.sensors.ray_caster.patterns import PinholeCameraPatternCfg
-from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+from isaaclab_tasks.manager_based.drone_arl.mdp.events import reset_single_obstacle
+from isaaclab_tasks.manager_based.drone_arl.mdp.observations import ImageLatentObservation
 
 from isaaclab_contrib.assets import MultirotorCfg
 from isaaclab_contrib.controllers import LeeVelControllerCfg
-
 import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
-from isaaclab_tasks.manager_based.drone_arl.mdp.commands import DroneUniformPoseCommandCfg
-from isaaclab_tasks.manager_based.drone_arl.mdp.curriculums import ObstacleDensityCurriculum
-from isaaclab_tasks.manager_based.drone_arl.mdp.events import reset_obstacles_with_individual_ranges
-from isaaclab_tasks.manager_based.drone_arl.mdp.observations import (
-    ImageLatentObservation,
-    base_roll_pitch,
-    generated_drone_commands,
-    last_action_navigation,
-)
-from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
-    distance_to_goal_exp_curriculum,
-    velocity_to_goal_reward_curriculum,
-)
 
-logging.getLogger("isaaclab.sensors.ray_caster.multi_mesh_ray_caster").setLevel(logging.WARNING)
+from isaaclab_tasks.manager_based.drone_arl.mdp.commands import DroneUniformPoseCommandCfg
+from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
+    ang_vel_xyz_exp,
+    distance_to_goal_exp,
+    lin_vel_xyz_exp,
+    yaw_aligned,
+    distance_to_goal_tanh,
+    distance_to_goal_l2
+)
 
 ##
 # Pre-defined configs
 ##
 from .scenes.obstacle_scenes.obstacle_scene import (
-    OBSTACLE_SCENE_CFG,
-    generate_obstacle_collection,
+    generate_obstacle_around_origin,
+    OBSTACLE_SCENE_CFG
 )
-
 
 ##
 # Scene definition
 ##
 @configclass
-class ArlNavigationSceneCfg(InteractiveSceneCfg):
-    """Scene configuration for drone navigation with obstacles."""
-
+class ArlDepthLatentNavigationSceneCfg(InteractiveSceneCfg):
+    """Scene configuration for drone navigation with simple obstacles."""
+    
     # obstacles
-    object_collection = generate_obstacle_collection(OBSTACLE_SCENE_CFG)
+    object_collection = generate_obstacle_around_origin()
 
     # robots
     robot: MultirotorCfg = MISSING
 
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        update_period=0.0,
+        history_length=10,
+        debug_vis=True,
+    )
+    
     # sensors
     depth_camera = MultiMeshRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         mesh_prim_paths=[
-            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
-                prim_expr=f"{{ENV_REGEX_NS}}/obstacle_{wall_name}", is_shared=False, track_mesh_transforms=True
-            )
-            for wall_name, _ in OBSTACLE_SCENE_CFG.wall_cfgs.items()
-        ]
-        + [
-            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
-                prim_expr=f"{{ENV_REGEX_NS}}/obstacle_{i}", is_shared=False, track_mesh_transforms=True
-            )
-            for i in range(OBSTACLE_SCENE_CFG.max_num_obstacles)
+            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(prim_expr="{ENV_REGEX_NS}/rod"),
         ], # type: ignore
         offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
             pos=(0.15, 0.0, 0.04), rot=(1.0, 0.0, 0.0, 0.0), convention="world"
@@ -94,14 +85,9 @@ class ArlNavigationSceneCfg(InteractiveSceneCfg):
         data_types=["distance_to_image_plane"],
         max_distance=10.0,
         depth_clipping_behavior="max",
+        debug_vis=True
     )
-
-    contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*",
-        update_period=0.0,
-        history_length=10,
-        debug_vis=False,
-    )
+    
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -127,9 +113,9 @@ class CommandsCfg:
         resampling_time_range=(10.0, 10.0),
         debug_vis=True,
         ranges=DroneUniformPoseCommandCfg.Ranges(
-            pos_x=(4.0, 5.0),
-            pos_y=(-3.0, 3.0),
-            pos_z=(1.0, 5.0),
+            pos_x=(-0.0, 0.0),
+            pos_y=(-0.0, 0.0),
+            pos_z=(-0.0, 0.0),
             roll=(-0.0, 0.0),
             pitch=(-0.0, 0.0),
             yaw=(-0.0, 0.0),
@@ -141,7 +127,7 @@ class CommandsCfg:
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    velocity_commands = mdp.NavigationActionCfg(
+    velocity_command = mdp.DirectVelocityActionCfg(
         asset_name="robot",
         scale=1.0,
         offset=0.0,
@@ -154,9 +140,8 @@ class ActionsCfg:
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_magnitude=2.0,
-        max_yaw_command=3.14 / 3.0,
-        max_inclination_angle=3.14 / 4.0,
+        max_velocity=0.5,       # 0.5 m/s
+        max_yaw_rate=0.7853982, # 45 degrees/s
     )
 
 
@@ -168,26 +153,18 @@ class ObservationsCfg:
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
 
-        # observation terms (order preserved)
-        base_link_position = ObsTerm(
-            func=generated_drone_commands,
-            params={"command_name": "target_pose", "asset_cfg": SceneEntityCfg("robot")},
-            noise=Unoise(n_min=-0.1, n_max=0.1),
-        )
-        base_roll_pitch = ObsTerm(func=base_roll_pitch, noise=Unoise(n_min=-0.1, n_max=0.1))
+        base_link_position = ObsTerm(func=mdp.root_pos_w, noise=Unoise(n_min=-0.1, n_max=0.1))
+        base_orientation = ObsTerm(func=mdp.root_quat_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
-        last_action = ObsTerm(
-            func=last_action_navigation,
-            params={"action_name": "velocity_commands"},
-        )
+        last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
         depth_latent = ObsTerm(
             func=ImageLatentObservation,
             params={"sensor_cfg": SceneEntityCfg("depth_camera"), "data_type": "distance_to_image_plane"},
         )
-
+        
         def __post_init__(self):
-            self.enable_corruption = False
+            self.enable_corruption = True
             self.concatenate_terms = True
 
     # observation groups
@@ -198,17 +175,20 @@ class ObservationsCfg:
 class EventCfg:
     """Configuration for events."""
 
-    # reset
-
-    reset_base = EventTerm(
-        func=mdp.reset_root_state_uniform,
+    reset_base_and_obstacle = EventTerm(
+        func=reset_single_obstacle,
         mode="reset",
         params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "obstacle_cfg": SceneEntityCfg("object_collection"),
+            "env_size": OBSTACLE_SCENE_CFG.env_size,
             "pose_range": {
-                "x": (-5.0, -4.5),
-                "y": (-3.0, 3.0),
-                "z": (1.0, 5.0),
-                "yaw": (-math.pi / 6.0, math.pi / 6.0),
+                "x": (-2.0, 2.0),
+                "y": (-2.0, 2.0),
+                "z": (-2.0, 2.0),
+                "yaw": (-math.pi, math.pi),
+                "roll": (-math.pi / 6.0, math.pi / 6.0),
+                "pitch": (-math.pi / 6.0, math.pi / 6.0),
             },
             "velocity_range": {
                 "x": (-0.2, 0.2),
@@ -221,18 +201,14 @@ class EventCfg:
         },
     )
 
-    reset_obstacles = EventTerm(
-        func=reset_obstacles_with_individual_ranges,
-        mode="reset",
+    # intervals
+    push_robot = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(0.0, 0.2),
         params={
-            "asset_cfg": SceneEntityCfg("object_collection"),
-            "obstacle_configs": OBSTACLE_SCENE_CFG.obstacle_cfgs,
-            "wall_configs": OBSTACLE_SCENE_CFG.wall_cfgs,
-            "env_size": OBSTACLE_SCENE_CFG.env_size,
-            "use_curriculum": True,
-            "min_num_obstacles": OBSTACLE_SCENE_CFG.min_num_obstacles,
-            "max_num_obstacles": OBSTACLE_SCENE_CFG.max_num_obstacles,
-            "ground_offset": OBSTACLE_SCENE_CFG.ground_offset,
+            "force_range": (-0.1, 0.1),
+            "torque_range": (-0.05, 0.05),
         },
     )
 
@@ -240,67 +216,78 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
+    
+    distance_to_goal_l2 = RewTerm(
+        func=distance_to_goal_l2,
+        weight=-5.0,  # negative weight — penalise distance
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "command_name": "target_pose",
+        },
+    )
 
-    goal_dist_exp1 = RewTerm(
-        func=distance_to_goal_exp_curriculum,
+    distance_to_goal_exp = RewTerm(
+        func=distance_to_goal_exp,
+        weight=25.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 1.5,
+            "command_name": "target_pose",
+        }
+    )
+    
+    distance_to_goal_tanh = RewTerm(
+        func=distance_to_goal_tanh,
+        weight=10.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.1,
+            "command_name": "target_pose",
+        },
+    )
+
+    yaw_aligned = RewTerm(
+        func=yaw_aligned,
         weight=2.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "std": 7.0,
-            "command_name": "target_pose",
-        },
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
     )
-    goal_dist_exp2 = RewTerm(
-        func=distance_to_goal_exp_curriculum,
-        weight=4.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "std": 0.5,
-            "command_name": "target_pose",
-        },
+    
+    flat_orientation_l2 = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=1.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    velocity_reward = RewTerm(
-        func=velocity_to_goal_reward_curriculum,
-        weight=0.5,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "target_pose",
-        },
+    
+    lin_vel_xyz_exp = RewTerm(
+        func=lin_vel_xyz_exp,
+        weight=2.5,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 2.0},
+    )
+    ang_vel_xyz_exp = RewTerm(
+        func=ang_vel_xyz_exp,
+        weight=10.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 10.0},
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
     action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
-
+    
     termination_penalty = RewTerm(
         func=mdp.is_terminated,
-        weight=-100.0,
+        weight=-500.0,
     )
-
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -3.0})
+    crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 3.0})
     collision = DoneTerm(
         func=mdp.illegal_contact,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*"), "threshold": 1.0},
         time_out=False,
     )
-
-
-@configclass
-class CurriculumCfg:
-    """Curriculum terms for the MDP."""
-
-    obstacle_levels = CurrTerm(
-        func=ObstacleDensityCurriculum,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "max_difficulty": 10,
-            "min_difficulty": 0,
-        },
-    )
-
 
 ##
 # Environment configuration
@@ -308,11 +295,13 @@ class CurriculumCfg:
 
 
 @configclass
-class NavigationVelocityFloatingObstacleEnvCfg(ManagerBasedRLEnvCfg):
-    """Configuration for the locomotion velocity-tracking environment."""
+class SimpleDepthLatentNavigationEnvCfg(ManagerBasedRLEnvCfg):
+    """Configuration for the simple lidar drone navigation environment."""
 
     # Scene settings
-    scene: ArlNavigationSceneCfg = ArlNavigationSceneCfg(num_envs=4096, env_spacing=20.5)
+    scene: ArlDepthLatentNavigationSceneCfg = ArlDepthLatentNavigationSceneCfg(
+        num_envs=4096, env_spacing=10.0
+    )
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -321,14 +310,11 @@ class NavigationVelocityFloatingObstacleEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
         """Post initialization."""
-        # general settings
         self.decimation = 10
         self.episode_length_s = 10.0
-        # simulation settings
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
         self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(
@@ -337,7 +323,7 @@ class NavigationVelocityFloatingObstacleEnvCfg(ManagerBasedRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         )
-        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=2**21)
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)
         if self.scene.contact_forces is not None:
