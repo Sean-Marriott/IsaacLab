@@ -15,7 +15,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.actuators import ThrusterCfg
 from isaaclab_contrib.assets import MultirotorCfg
-
+import math
 ##
 # Configuration - Actuators.
 ##
@@ -117,6 +117,7 @@ MATRICE_CFG = MultirotorCfg(
             "front_left_prop": 69.0,
             "front_right_prop": 69.0,
         },
+        joint_pos={"csTubePitch": math.pi}
     ),
     actuators={"thrusters": MATRICE_THRUSTER},
     rotor_directions=[-1, 1, -1, 1],

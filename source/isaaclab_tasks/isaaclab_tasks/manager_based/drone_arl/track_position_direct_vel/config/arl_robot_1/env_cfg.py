@@ -46,17 +46,17 @@ class MatriceDirectVelEnvCfg(TrackPositionDirectVelEnvCfg):
         ctrl.K_rot_range = ((10.0, 10.0, 3.0), (13.0, 13.0, 4.5))
         ctrl.K_angvel_range = ((4.0, 4.0, 2.5), (5.0, 5.0, 3.5))
 
-        # Reset chainsaw arm joints to their default position (0 rad) at each episode start.
-        # Without this they accumulate freely between episodes since no actuator drives them.
-        self.events.reset_chainsaw_joints = EventTerm(
-            func=mdp.reset_joints_by_offset,
-            mode="reset",
-            params={
-                "position_range": (0.0, 0.0),
-                "velocity_range": (0.0, 0.0),
-                "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll", "chainsawJoint"]),
-            },
-        )
+        # # Reset chainsaw arm joints to their default position (0 rad) at each episode start.
+        # # Without this they accumulate freely between episodes since no actuator drives them.
+        # self.events.reset_chainsaw_joints = EventTerm(
+        #     func=mdp.reset_joints_by_offset,
+        #     mode="reset",
+        #     params={
+        #         "position_range": (0.0, 0.0),
+        #         "velocity_range": (0.0, 0.0),
+        #         "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll", "chainsawJoint"]),
+        #     },
+        # )
 
 
 @configclass
