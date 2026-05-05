@@ -10,8 +10,15 @@ The following configuration parameters are available:
 * :obj:`ARL_ROBOT_1_CFG`: The ARL_Robot_1
 """
 
+import math
+import pathlib
+
 import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+_M350_USD_PATH = str(
+    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350-chainsaw.usd"
+)
 
 from isaaclab_contrib.actuators import ThrusterCfg
 from isaaclab_contrib.assets import MultirotorCfg
@@ -91,7 +98,7 @@ MATRICE_THRUSTER = ThrusterCfg(
 
 MATRICE_CFG = MultirotorCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/sean/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/drone_arl/robots/M350-chainsaw.usd",
+        usd_path=_M350_USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
