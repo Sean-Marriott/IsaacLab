@@ -89,7 +89,7 @@ def root_height_above_maximum(
         A boolean tensor indicating whether the asset's root height is above the maximum height.
     """
     asset: RigidObject = env.scene[asset_cfg.name]
-    return wp.to_torch(asset.data.root_pos_w)[:, 2] > maximum_height
+    return asset.data.root_pos_w.torch[:, 2] > maximum_height
     
 
 """

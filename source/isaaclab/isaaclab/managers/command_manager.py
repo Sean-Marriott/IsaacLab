@@ -121,7 +121,7 @@ class CommandTerm(ManagerTermBase):
         # return success
         return True
 
-    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
         """Reset the command generator and log metrics.
 
         This function resets the command counter and resamples the command. It should be called
@@ -141,7 +141,7 @@ class CommandTerm(ManagerTermBase):
         extras = {}
         for metric_name, metric_value in self.metrics.items():
             # compute the mean metric value
-            extras[metric_name] = torch.mean(metric_value[env_ids]).item()
+            extras[metric_name] = torch.mean(metric_value[env_ids])
             # reset the metric value
             metric_value[env_ids] = 0.0
 

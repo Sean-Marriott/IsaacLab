@@ -98,7 +98,7 @@ class UniformPose2dCommand(CommandTerm):
         if self._track_success:
             self._succeeded |= self.metrics["error_pos"] < self.cfg.position_success_threshold
 
-    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
         extras = super().reset(env_ids)
         if self._track_success:
             if env_ids is None:
@@ -106,7 +106,7 @@ class UniformPose2dCommand(CommandTerm):
             # Write the unified ``Metrics/success_rate`` directly to env extras so it shares
             # a TensorBoard card with the same metric from other tasks.
             self._env.extras.setdefault("log", {})["Metrics/success_rate"] = (
-                self._succeeded[env_ids].float().mean().item()
+                self._succeeded[env_ids].float().mean()
             )
             self._succeeded[env_ids] = False
         return extras
