@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 
 from .curriculums import get_obstacle_curriculum_term
 
 if TYPE_CHECKING:
-    from isaaclab.assets import RigidObject
+    from isaaclab.assets import RigidObject, Articulation
     from isaaclab.envs import ManagerBasedRLEnv
 
 """
@@ -28,25 +28,28 @@ def distance_to_goal_l2(
     command_name: str = "target_pose",
 ) -> torch.Tensor:
     """Penalize tracking of the position error using L2-norm.
-    
-    The function computes the position error between the commanded target position 
-    and the asset (robot) root position.
-    
+
+    The function computes the position error between the commanded target position
+    and the body position of the asset.
+
     Args:
         env: The manager-based RL environment instance.
         asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+            Must have ``body_ids`` configured to select the tracked body link.
         command_name: Name of the command to read the target pose from the
             environment's command manager. The function expects the command
             tensor to contain positions in its first three columns.
-            
+
     Returns:
         A 1-D tensor of shape (num_envs,) containing the per-environment distance
         errors to be combined with a penalty i.e. negative weight.
     """
+    # extract the asset (to enable type hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
 
-    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
+    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins # type: ignore
+    
     # compute the error
     position_error = torch.norm(command[:, :3] - current_position, dim=1)
     return position_error
@@ -58,13 +61,14 @@ def distance_to_goal_tanh(
     command_name: str = "target_pose",
 ) -> torch.Tensor:
     """Reward the distance to a goal using a tanh kernel.
-    
-    The function computes the position error between the commanded target position and the asset (robot) root position
-    and maps it with a tanh kernel.
+
+    The function computes the position error between the commanded target position
+    and the body position of the asset and maps it with a tanh kernel.
 
     Args:
         env: The manager-based RL environment instance.
         asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+            Must have ``body_ids`` configured to select the tracked body link.
         std: Scaling parameter for the tanh kernel. Controls the distance at which
             the reward transitions from high to low — smaller values produce a
             sharper falloff concentrated near the goal, larger values spread the
@@ -75,13 +79,12 @@ def distance_to_goal_tanh(
 
     Returns:
         A 1-D tensor of shape (num_envs,) containing the per-environment reward
-        values in [0, 1], with 1.0 when the position error is zero.    
+        values in [0, 1], with 1.0 when the position error is zero.
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
 
-    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
-    # compute the error
+    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
     position_error = torch.norm(command[:, :3] - current_position, dim=1)
     return 1 - torch.tanh(position_error / std)
 
@@ -94,11 +97,12 @@ def distance_to_goal_exp(
     """Reward the distance to a goal position using an exponential kernel.
 
     This reward computes an exponential falloff of the squared Euclidean distance
-    between the commanded target position and the asset (robot) root position.
+    between the commanded target position and the body position of the asset.
 
     Args:
         env: The manager-based RL environment instance.
         asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+            Must have ``body_ids`` configured to select the tracked body link.
         std: Standard deviation used in the exponential kernel; larger values
             produce a gentler falloff.
         command_name: Name of the command to read the target pose from the
@@ -109,14 +113,10 @@ def distance_to_goal_exp(
         A 1-D tensor of shape (num_envs,) containing the per-environment reward
         values in [0, 1], with 1.0 when the position error is zero.
     """
-    # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
 
-    target_position_w = command[:, :3].clone()
-    current_position = asset.data.root_pos_w.torch - env.scene.env_origins
-
-    # compute the error
+    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
     position_error_square = torch.sum(torch.square(command[:, :3] - current_position), dim=1)
     return torch.exp(-position_error_square / std**2)
 
@@ -129,16 +129,17 @@ def distance_to_goal_exp_curriculum(
 ) -> torch.Tensor:
     """Reward the distance to a goal position using an exponential kernel with curriculum-based scaling.
 
-    This reward extends the basic exponential distance reward by applying a scaling factor
-    that increases with the obstacle difficulty level. As the curriculum progresses and
-    obstacle density increases, the reward weight grows to compensate for the added difficulty.
+    This reward extends :func:`distance_to_goal_exp` by applying a scaling factor that
+    increases with the obstacle difficulty level. As the curriculum progresses and obstacle
+    density increases, the reward weight grows to compensate for the added difficulty.
 
-    The scaling weight is computed as: 1.0 + (difficulty_level / max_difficulty), meaning
-    the reward can scale from 1.0x (at minimum difficulty) to 2.0x (at maximum difficulty).
+    The scaling weight is computed as: ``1.0 + (difficulty_level / max_difficulty)``, meaning
+    the reward scales from 1.0x (at minimum difficulty) to 2.0x (at maximum difficulty).
 
     Args:
         env: The manager-based RL environment instance.
         asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+            Must have ``body_ids`` configured to select the tracked body link.
         std: Standard deviation used in the exponential kernel; larger values
             produce a gentler falloff. Defaults to 1.0.
         command_name: Name of the command to read the target pose from the
@@ -154,13 +155,10 @@ def distance_to_goal_exp_curriculum(
         If no curriculum is active (i.e., ObstacleDensityCurriculum is not found),
         the function behaves identically to :func:`distance_to_goal_exp` with weight=1.0.
     """
-    # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
 
-    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
-
-    # compute the error
+    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
     position_error_square = torch.sum(torch.square(command[:, :3] - current_position), dim=1)
 
     # Get curriculum term and compute weight
@@ -314,3 +312,31 @@ def yaw_aligned(
 
     # return exponential reward (1 when yaw=0, approaching 0 when rotated)
     return torch.exp(-(yaw**2) / std**2)
+
+def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize joint position deviation from a target value using a circular L2-norm.
+
+    Joint positions are read as absolute angles in the USD joint coordinate frame.
+    The difference from the target is wrapped to ``(-π, π]`` before squaring, which
+    keeps the penalty continuous everywhere — including when the target is near ±π,
+    where wrapping the raw position first would create a large discontinuity.
+
+    Args:
+        env: The manager-based RL environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+            Configure ``joint_ids`` to select specific joints.
+        target: Target joint angle [rad], in the same absolute coordinate frame
+            as ``asset.data.joint_pos``.
+
+    Returns:
+        A 1-D tensor of shape (num_envs,) containing the per-environment sum of
+        squared angular errors, intended for use with a negative reward weight.
+    """
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    joint_pos = asset.data.joint_pos.torch
+    if asset_cfg.joint_ids is not None:
+        joint_pos = joint_pos[:, asset_cfg.joint_ids]
+
+    return torch.sum(torch.square(math_utils.wrap_to_pi(joint_pos - target)), dim=1)
