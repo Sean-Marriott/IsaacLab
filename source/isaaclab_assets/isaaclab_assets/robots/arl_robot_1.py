@@ -17,7 +17,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 _M350_USD_PATH = str(
-    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350-chainsaw.usd"
+    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350.usd"
 )
 
 from isaaclab_contrib.actuators import ThrusterCfg
@@ -81,12 +81,17 @@ ARL_ROBOT_1_CFG = MultirotorCfg(
     ],
 )
 
-# DJI Matrice 350 RTK: 6.5 kg airframe.
-# Thrust model from rotor_constant=8.48e-5 N/(rad/s)², max_rotor_velocity=800 rad/s:
-#   k_f = 8.48e-5 × (2π)² = 3.35e-3 N/rps², hover at ~69 RPS (~4100 RPM), max ~54 N/motor.
-# Allocation uses the same sign pattern as ARL_ROBOT_1, scaled to M350 motor positions:
-#   back_left  (-0.3182,  0.3382), back_right  (-0.3182, -0.3382)
-#   front_left ( 0.3161,  0.3786), front_right ( 0.3161, -0.3786)
+# DJI Matrice 350 RTK.
+# Thrust model: k_f = 3.35e-3 N/rps² (mean of thrust_const_range), max 55 N/motor.
+# Hover RPS = sqrt(m * g / (4 * k_f_nominal)).  Run scripts/demos/arl_robot_1.py to get
+# the value that matches the actual USD mass; update init_state.rps accordingly.
+# Allocation matrix row conventions (motor order: BL, BR, FL, FR):
+#   row 2  Fz [N]:   sum of thrusts
+#   row 3  Tx [N·m]: fore-aft moment (x-arm distances)
+#   row 4  Ty [N·m]: lateral moment (y-arm distances)
+#   row 5  Tz [N·m]: yaw torque (torque_to_thrust_ratio × rotor_direction)
+# Motor positions: back_left (-0.3182,  0.3382), back_right (-0.3182, -0.3382)
+#                 front_left ( 0.3161,  0.3786), front_right ( 0.3161, -0.3786)
 MATRICE_THRUSTER = ThrusterCfg(
     thrust_range=(0.5, 55.0),
     thrust_const_range=(2.8e-3, 3.9e-3),
@@ -124,7 +129,6 @@ MATRICE_CFG = MultirotorCfg(
             "front_left_prop": 69.0,
             "front_right_prop": 69.0,
         },
-        joint_pos={"csTubePitch": math.pi}
     ),
     actuators={"thrusters": MATRICE_THRUSTER},
     rotor_directions=[-1, 1, -1, 1],

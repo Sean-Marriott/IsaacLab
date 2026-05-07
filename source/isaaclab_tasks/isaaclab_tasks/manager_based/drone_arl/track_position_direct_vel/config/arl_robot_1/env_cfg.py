@@ -38,26 +38,23 @@ class MatriceDirectVelEnvCfg(TrackPositionDirectVelEnvCfg):
         self.scene.robot = MATRICE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.actuators["thrusters"].dt = self.sim.dt
 
-        # M350: Ixx=Iyy=0.7 kg·m², Izz=0.9 kg·m² vs ARL ~0.02 kg·m².
-        # K_rot = I·ωn², K_angvel = 2ζ·I·ωn
-        # roll/pitch: ωn=4 rad/s, ζ=0.8 → K_rot≈11.2, K_angvel≈4.5
-        # yaw:        ωn=2 rad/s, ζ=0.8 → K_rot≈3.6,  K_angvel≈2.9
+        # Gains derived from actual PhysX inertia (scripts/demos/arl_robot_1.py):
+        #   mass=6.500 kg, I_xx=0.775, I_yy=0.756, I_zz=1.029 kg·m²
+        #   tau_max=49.6 N·m  →  nominal K_rot_xy=80, K_angvel_xy=18.9, K_vel_xy=3.38
+        #
+        # Ranges use ±10 % to ensure ζ > 1.03 at every randomisation corner:
+        #   worst case (K_rot=88, K_angvel=17.0, I=0.776): ζ = 1.03
+        #   best  case (K_rot=72, K_angvel=20.8, I=0.776): ζ = 1.39
+        #
+        # Design equations for re-tuning after a model change:
+        #   K_rot    = min(tau_max / (0.5 × I_att), 80)       tau_max = Δ_thrust × min(sum|pitch_arms|, sum|roll_arms|)
+        #   K_angvel = 2 × 1.2 × sqrt(K_rot / I_att) × I_att
+        #   K_vel    = sqrt(K_rot / I_att) / 3                 (3× cascade bandwidth margin)
+        #   Yaw: K_rot_z = 0.4 × K_rot_xy, K_angvel_z from same ζ formula with I_zz
         ctrl = self.actions.velocity_command.controller_cfg
-        ctrl.K_rot_range = ((10.0, 10.0, 3.0), (13.0, 13.0, 4.5))
-        ctrl.K_angvel_range = ((4.0, 4.0, 2.5), (5.0, 5.0, 3.5))
-
-        # # Reset chainsaw arm joints to their default position (0 rad) at each episode start.
-        # # Without this they accumulate freely between episodes since no actuator drives them.
-        # self.events.reset_chainsaw_joints = EventTerm(
-        #     func=mdp.reset_joints_by_offset,
-        #     mode="reset",
-        #     params={
-        #         "position_range": (0.0, 0.0),
-        #         "velocity_range": (0.0, 0.0),
-        #         "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll", "chainsawJoint"]),
-        #     },
-        # )
-
+        ctrl.K_rot_range    = ((72.0, 72.0, 28.8), (88.0, 88.0, 35.2))
+        ctrl.K_angvel_range = ((17.0, 17.0, 12.4), (20.8, 20.8, 15.1))
+        ctrl.K_vel_range    = (( 3.0,  3.0,  4.6), ( 3.7,  3.7,  5.6))
 
 @configclass
 class MatriceDirectVelEnvCfg_PLAY(MatriceDirectVelEnvCfg):
