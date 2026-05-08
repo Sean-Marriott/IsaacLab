@@ -33,7 +33,8 @@ from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
     lin_vel_xyz_exp,
     yaw_aligned,
     distance_to_goal_tanh,
-    distance_to_goal_l2
+    distance_to_goal_l2,
+    joint_pos_target_l2,
 )
 
 
@@ -69,7 +70,7 @@ class CommandsCfg:
     target_pose = DroneUniformPoseCommandCfg(
         asset_name="robot",
         body_name="base_link",
-        resampling_time_range=(10.0, 10.0),
+        resampling_time_range=(25.0, 25.0),
         debug_vis=True,
         ranges=DroneUniformPoseCommandCfg.Ranges(
             pos_x=(-0.0, 0.0),
@@ -93,14 +94,16 @@ class ActionsCfg:
         preserve_order=False,
         use_default_offset=False,
         controller_cfg=LeeVelControllerCfg(
+            # ARL Robot 1 gains (well-tuned baseline).
+            # MatriceDirectVelEnvCfg overrides these three ranges for the M350.
             K_vel_range=((2.5, 2.5, 1.5), (3.5, 3.5, 2.0)),
             K_rot_range=((1.6, 1.6, 0.25), (1.85, 1.85, 0.4)),
             K_angvel_range=((0.4, 0.4, 0.075), (0.5, 0.5, 0.09)),
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_velocity=0.5,       # 0.5 m/s
-        max_yaw_rate=0.7853982, # 45 degrees/s
+        max_velocity=0.2,       # 0.5 m/s
+        max_yaw_rate=0.7853982, # 45 deg/s
     )
 
 
@@ -116,8 +119,10 @@ class ObservationsCfg:
         base_orientation = ObsTerm(func=mdp.root_quat_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},) # noise=Unoise(n_min=-0.08, n_max=0.08))
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},) # noise=Unoise(n_min=-0.1, n_max=0.1))
         last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
-
+        
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
@@ -135,12 +140,12 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {
-                # "x": (-2.0, 2.0),
-                # "y": (-2.0, 2.0),
-                # "z": (-2.0, 2.0),
-                # "yaw": (-math.pi, math.pi),
-                # "roll": (-math.pi / 6.0, math.pi / 6.0),
-                # "pitch": (-math.pi / 6.0, math.pi / 6.0),
+                "x": (-2.0, 2.0),
+                "y": (-2.0, 2.0),
+                "z": (-2.0, 2.0),
+                "yaw": (-math.pi, math.pi),
+                "roll": (-math.pi / 6.0, math.pi / 6.0),
+                "pitch": (-math.pi / 6.0, math.pi / 6.0),
             },
             "velocity_range": {
                 # "x": (-0.2, 0.2),
@@ -154,15 +159,15 @@ class EventCfg:
     )
     
     # intervals
-    push_robot = EventTerm(
-        func=mdp.apply_external_force_torque,
-        mode="interval",
-        interval_range_s=(0.0, 0.2),
-        params={
-            "force_range": (-0.1, 0.1),
-            "torque_range": (-0.05, 0.05),
-        },
-    )
+    # push_robot = EventTerm(
+    #     func=mdp.apply_external_force_torque,
+    #     mode="interval",
+    #     interval_range_s=(0.0, 0.2),
+    #     params={
+    #         "force_range": (-0.1, 0.1),
+    #         "torque_range": (-0.05, 0.05),
+    #     },
+    # )
 
 
 @configclass
@@ -171,19 +176,28 @@ class RewardsCfg:
 
     distance_to_goal_l2 = RewTerm(
         func=distance_to_goal_l2,
-        weight=-1.0,  # negative weight — penalise distance
+        weight=-1.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+            "command_name": "target_pose",
+        },
+    )
+    distance_to_goal_exp = RewTerm(
+        func=distance_to_goal_exp,
+        weight=15.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+            "std": 2.0,
             "command_name": "target_pose",
         },
     )
     distance_to_goal_tanh = RewTerm(
-        func=distance_to_goal_tanh,
-        weight=10.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "std": 0.1,
-            "command_name": "target_pose",
+    func=distance_to_goal_tanh,
+    weight=35.0,
+    params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+        "std": 0.5,
+        "command_name": "target_pose",
         },
     )
     flat_orientation_l2 = RewTerm(
@@ -193,35 +207,53 @@ class RewardsCfg:
     )
     yaw_aligned = RewTerm(
         func=yaw_aligned,
-        weight=5.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
+        weight=10.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.3},
     )
     lin_vel_xyz_exp = RewTerm(
         func=lin_vel_xyz_exp,
         weight=2.5,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 2.0},
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.5},
     )
     ang_vel_xyz_exp = RewTerm(
         func=ang_vel_xyz_exp,
         weight=10.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 10.0},
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
     )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
-    action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
-
+    pole_pitch = RewTerm(
+        func=joint_pos_target_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"]), "target": 0.0},
+    )
+    pole_roll = RewTerm(
+        func=joint_pos_target_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"]), "target": 0.0},
+    )
+    pole_pitch_vel = RewTerm(
+        func=mdp.joint_vel_l1,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"])},
+    )
+    pole_roll_vel = RewTerm(
+        func=mdp.joint_vel_l1,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"])},
+    )
     termination_penalty = RewTerm(
         func=mdp.is_terminated,
         weight=-5.0,
     )
-
+    # action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    # action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -3.0})
-    crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 3.0})
+    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -10.0})
+    crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 10.0})
     
 
 ##
@@ -249,7 +281,8 @@ class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         self.decimation = 10
-        self.episode_length_s = 10.0
+   
+        self.episode_length_s = 25.0 # TODO: Maybe increase episode length
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
         self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(
