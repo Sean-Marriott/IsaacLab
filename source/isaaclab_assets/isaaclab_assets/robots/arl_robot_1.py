@@ -17,7 +17,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 _M350_USD_PATH = str(
-    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350.usd"
+    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350-chainsaw.usd"
 )
 
 from isaaclab_contrib.actuators import ThrusterCfg
