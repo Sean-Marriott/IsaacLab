@@ -340,3 +340,109 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
         joint_pos = joint_pos[:, asset_cfg.joint_ids]
 
     return torch.sum(torch.square(math_utils.wrap_to_pi(joint_pos - target)), dim=1)
+
+def upright_while_moving(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot")) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # pole error (squared deviation from upright)
+    pitch = asset.data.joint_pos[:, asset_cfg.joint_ids[0]]
+    roll = asset.data.joint_pos[:, asset_cfg.joint_ids[1]]
+    pole_error_sq = pitch**2 + roll**2
+
+    # base speed (horizontal plane)
+    base_speed = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=-1)
+
+    # reward is "upright bonus weighted by how much you're moving"
+    # the +0.3 floor keeps stationary upright still slightly rewarded
+    weight = base_speed + 0.3
+    return -pole_error_sq * weight
+
+
+class PoleEnergy(ManagerTermBase):
+    """Penalize pole swing energy: E = ½·I·ω² + m·g·L·(1 − cos θ).
+
+    Physical constants (mass, pendulum length, gravity) are read from the
+    simulation at initialization so nothing needs to be hardcoded in the config.
+    Effective inertia uses the point-mass-at-COM approximation ``I = m·L²``,
+    which is the dominant term when the COM offset L is large relative to the
+    body's own radius of gyration.
+
+    The combined kinetic + potential energy is zero only when the pole is
+    perfectly upright and motionless. Damping alone cannot drive energy to zero
+    quickly — the policy must apply active counter-torques, which is exactly
+    the behaviour we want to incentivise. Use with a negative weight.
+
+    Args:
+        cfg: Reward term configuration. Must contain ``asset_cfg`` (with
+            ``joint_ids`` for [pitch, roll] joints) and ``pole_body_cfg``
+            (with ``body_names`` for the hanging pole link) in ``params``.
+        env: The manager-based RL environment instance.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        pole_body_cfg: SceneEntityCfg = cfg.params["pole_body_cfg"]
+
+        # Resolve both configs so that joint_ids and body_ids are int lists.
+        asset_cfg.resolve(env.scene)
+        pole_body_cfg.resolve(env.scene)
+
+        joint_ids = asset_cfg.joint_ids
+        body_ids = pole_body_cfg.body_ids
+        assert isinstance(joint_ids, list) and len(joint_ids) >= 2, (
+            "asset_cfg must specify exactly 2 joints by name: [pitch, roll]"
+        )
+        assert isinstance(body_ids, list) and len(body_ids) >= 1, (
+            "pole_body_cfg must specify the pole body by name"
+        )
+
+        # Cache integer indices so __call__ avoids re-indexing a list|slice union.
+        self._pitch_id: int = joint_ids[0]
+        self._roll_id: int = joint_ids[1]
+
+        asset: Articulation = env.scene[asset_cfg.name]
+        pole_body_id: int = body_ids[0]
+
+        # Mass per env [kg], shape (num_envs,). Cloned so the cached tensor is
+        # independent of the underlying PhysX buffer (re-fetched each access).
+        mass = asset.data.body_mass.torch[:, pole_body_id].clone()
+
+        # COM offset in the body link frame [m], shape (num_envs, 3).
+        # The link frame origin is at the joint, so ‖offset‖ is pendulum length L.
+        com_all = asset.data.body_com_pose_b.torch  # (num_envs, num_bodies, 7)
+        length = torch.norm(com_all[:, pole_body_id, :3], dim=-1).clone()  # (num_envs,)
+
+        # Gravity magnitude [m/s²] from sim config (z-component magnitude).
+        gravity = abs(env.sim.cfg.gravity[2])
+
+        # Pre-compute per-env coefficients to avoid repeated multiplications.
+        # kinetic:   ½ · m · L² · (ω_pitch² + ω_roll²)
+        # potential: m · g · L  · (1 − cos √(θ_pitch² + θ_roll²))
+        self._kinetic_coeff = 0.5 * mass * length**2    # (num_envs,)
+        self._potential_coeff = mass * gravity * length  # (num_envs,)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        pole_body_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        asset: Articulation = env.scene[asset_cfg.name]
+
+        joint_pos = asset.data.joint_pos.torch  # (num_envs, num_joints)
+        joint_vel = asset.data.joint_vel.torch  # (num_envs, num_joints)
+
+        pitch     = joint_pos[:, self._pitch_id]
+        roll      = joint_pos[:, self._roll_id]
+        pitch_vel = joint_vel[:, self._pitch_id]
+        roll_vel  = joint_vel[:, self._roll_id]
+
+        vel_sq  = pitch_vel**2 + roll_vel**2
+        tilt_sq = pitch**2 + roll**2
+
+        kinetic   = self._kinetic_coeff * vel_sq
+        potential = self._potential_coeff * (1.0 - torch.cos(torch.sqrt(tilt_sq + 1e-8)))
+
+        return kinetic + potential
