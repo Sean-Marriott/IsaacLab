@@ -63,3 +63,5 @@ class MatriceDirectVelEnvCfg_PLAY(MatriceDirectVelEnvCfg):
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
+        self.events.push_pole = None
+        self.events.push_robot = None
