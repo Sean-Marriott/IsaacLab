@@ -34,9 +34,10 @@ from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
     yaw_aligned,
     distance_to_goal_tanh,
     distance_to_goal_l2,
-    joint_pos_target_l2,
+    PoleEnergy,
 )
 
+EPISODE_LENGTH_SECONDS = 20.0
 
 ##
 # Scene definition
@@ -70,7 +71,7 @@ class CommandsCfg:
     target_pose = DroneUniformPoseCommandCfg(
         asset_name="robot",
         body_name="base_link",
-        resampling_time_range=(25.0, 25.0),
+        resampling_time_range=(EPISODE_LENGTH_SECONDS, EPISODE_LENGTH_SECONDS),
         debug_vis=True,
         ranges=DroneUniformPoseCommandCfg.Ranges(
             pos_x=(-0.0, 0.0),
@@ -102,7 +103,7 @@ class ActionsCfg:
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_velocity=0.2,       # 0.5 m/s
+        max_velocity=1.0,       # 0.5 m/s
         max_yaw_rate=0.7853982, # 45 deg/s
     )
 
@@ -148,26 +149,57 @@ class EventCfg:
                 "pitch": (-math.pi / 6.0, math.pi / 6.0),
             },
             "velocity_range": {
-                # "x": (-0.2, 0.2),
-                # "y": (-0.2, 0.2),
-                # "z": (-0.2, 0.2),
-                # "roll": (-0.2, 0.2),
-                # "pitch": (-0.2, 0.2),
-                # "yaw": (-0.2, 0.2),
+                "x": (-0.2, 0.2),
+                "y": (-0.2, 0.2),
+                "z": (-0.2, 0.2),
+                "roll": (-0.2, 0.2),
+                "pitch": (-0.2, 0.2),
+                "yaw": (-0.2, 0.2),
             },
         },
     )
     
+    reset_chainsaw_pitch = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-math.pi/3, math.pi/3),
+            "velocity_range": (-0.2, 0.2),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"]),
+        }
+    )
+    
+    reset_chainsaw_roll = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-0.6, 0.6),  # (~±35°)
+            "velocity_range": (-0.1, 0.1),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"]),
+        }
+    )
+    
     # intervals
-    # push_robot = EventTerm(
-    #     func=mdp.apply_external_force_torque,
-    #     mode="interval",
-    #     interval_range_s=(0.0, 0.2),
-    #     params={
-    #         "force_range": (-0.1, 0.1),
-    #         "torque_range": (-0.05, 0.05),
-    #     },
-    # )
+    push_robot = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(0.0, EPISODE_LENGTH_SECONDS),
+        params={
+            "force_range": (-0.1, 0.1),
+            "torque_range": (-0.05, 0.05),
+        },
+    )
+    
+    push_pole = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(10.0, 10.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["chainsaw"]),
+            "force_range": (-50.0, 50.0),
+            "torque_range": (-1.0, 1.0),
+        },
+    )
 
 
 @configclass
@@ -182,67 +214,40 @@ class RewardsCfg:
             "command_name": "target_pose",
         },
     )
-    distance_to_goal_exp = RewTerm(
-        func=distance_to_goal_exp,
-        weight=15.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
-            "std": 2.0,
-            "command_name": "target_pose",
-        },
-    )
-    distance_to_goal_tanh = RewTerm(
-    func=distance_to_goal_tanh,
-    weight=35.0,
-    params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
-        "std": 0.5,
-        "command_name": "target_pose",
-        },
-    )
-    flat_orientation_l2 = RewTerm(
-        func=mdp.flat_orientation_l2,
-        weight=1.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
+    # distance_to_goal_exp = RewTerm(
+    #     func=distance_to_goal_exp,
+    #     weight=15.0,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+    #         "std": 2.0,
+    #         "command_name": "target_pose",
+    #     },
+    # )
+    # distance_to_goal_tanh = RewTerm(
+    #     func=distance_to_goal_tanh,
+    #     weight=35.0,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+    #         "std": 0.5,
+    #         "command_name": "target_pose",
+    #         },
+    # )
     yaw_aligned = RewTerm(
         func=yaw_aligned,
-        weight=10.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.3},
+        weight=5.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.25},
     )
-    lin_vel_xyz_exp = RewTerm(
-        func=lin_vel_xyz_exp,
-        weight=2.5,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.5},
-    )
-    ang_vel_xyz_exp = RewTerm(
-        func=ang_vel_xyz_exp,
-        weight=10.0,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
-    )
-    pole_pitch = RewTerm(
-        func=joint_pos_target_l2,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"]), "target": 0.0},
-    )
-    pole_roll = RewTerm(
-        func=joint_pos_target_l2,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"]), "target": 0.0},
-    )
-    pole_pitch_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"])},
-    )
-    pole_roll_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"])},
+    pole_energy = RewTerm(
+        func=PoleEnergy,  # type: ignore[arg-type]
+        weight=-100.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"]),
+            "pole_body_cfg": SceneEntityCfg("robot", body_names=["chainsaw"]),
+        },
     )
     termination_penalty = RewTerm(
         func=mdp.is_terminated,
-        weight=-5.0,
+        weight=-500.0,
     )
     # action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
     # action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
@@ -282,7 +287,7 @@ class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
         """Post initialization."""
         self.decimation = 10
    
-        self.episode_length_s = 25.0 # TODO: Maybe increase episode length
+        self.episode_length_s = EPISODE_LENGTH_SECONDS
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
         self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(
