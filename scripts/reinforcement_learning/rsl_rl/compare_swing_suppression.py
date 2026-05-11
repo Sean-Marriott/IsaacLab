@@ -99,6 +99,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Disable disturbance pushes so the only difference between the two
         # rollouts is the policy — not random external forces.
         env_cfg.events.push_robot = None  # type: ignore[union-attr]
+        env_cfg.events.push_pole = None  # type: ignore[union-attr]
 
         # Resolve checkpoint
         log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
