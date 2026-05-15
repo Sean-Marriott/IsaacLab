@@ -21,6 +21,9 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
+
+from isaaclab.utils.modifiers import DelayedObservationCfg
 
 from isaaclab_contrib.assets import MultirotorCfg
 from isaaclab_contrib.controllers import LeeVelControllerCfg
@@ -103,7 +106,7 @@ class ActionsCfg:
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_velocity=1.0,       # 0.5 m/s
+        max_velocity=0.5,       # 0.5 m/s
         max_yaw_rate=0.7853982, # 45 deg/s
     )
 
@@ -115,13 +118,61 @@ class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
-
+        
         base_link_position = ObsTerm(func=mdp.root_pos_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_orientation = ObsTerm(func=mdp.root_quat_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},) # noise=Unoise(n_min=-0.08, n_max=0.08))
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},) # noise=Unoise(n_min=-0.1, n_max=0.1))
+        
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos, 
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},  
+            noise=Gnoise(mean=0.0, std=0.0175), 
+            modifiers=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        ) # ~1.0°/s std
+        
+        joint_pitch_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"])},
+            noise=Gnoise(mean=0.0, std=0.035),
+            modifiers=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        ) # ~2.0°/s std
+        
+        joint_roll_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"])},
+            noise=Gnoise(mean=0.0, std=0.125),
+            modifiers=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        ) # ~7.0°/s std
+        
+        
         last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
         
         def __post_init__(self):
