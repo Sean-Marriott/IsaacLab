@@ -418,6 +418,7 @@ class PoleEnergy(ManagerTermBase):
         gravity = abs(env.sim.cfg.gravity[2])
 
         # Pre-compute per-env coefficients to avoid repeated multiplications.
+        # Using spherical pendulum energy model
         # kinetic:   ½ · m · L² · (ω_pitch² + ω_roll²)
         # potential: m · g · L  · (1 − cos √(θ_pitch² + θ_roll²))
         self._kinetic_coeff = 0.5 * mass * length**2    # (num_envs,)
@@ -433,7 +434,7 @@ class PoleEnergy(ManagerTermBase):
 
         joint_pos = asset.data.joint_pos.torch  # (num_envs, num_joints)
         joint_vel = asset.data.joint_vel.torch  # (num_envs, num_joints)
-
+        
         pitch     = joint_pos[:, self._pitch_id]
         roll      = joint_pos[:, self._roll_id]
         pitch_vel = joint_vel[:, self._pitch_id]

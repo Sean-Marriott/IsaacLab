@@ -15,6 +15,7 @@ class TrackPositionNoObstaclesEnvPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "arl_robot_1_track_position_direct_vel"
     empirical_normalization = False
+    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.5,
         actor_hidden_dims=[256, 128, 64],
