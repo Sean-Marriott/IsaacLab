@@ -3,27 +3,26 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Matrice 350 RTK — Lee velocity controller demonstration.
+"""Matrice 350 RTK — Lee velocity controller demonstration (no live plot).
 
-Runs a structured velocity command sequence and plots tracking performance
-across four panels: body-frame velocity, roll/pitch attitude, yaw rate, and
-total thrust.  Controller gains are computed analytically from the actual
-PhysX inertia at startup so the script adapts automatically to model changes.
+Identical to matrice_vel_demo.py but skips the interactive matplotlib graph
+during the simulation loop to avoid the per-frame overhead.  After the
+sequence completes the full plot is rendered once and saved to
+``matrice_vel_demo_results.png`` in the current working directory.
 
 Launch:
-    ./isaaclab.sh -p scripts/demos/matrice_vel_demo.py --viz kit
+    ./isaaclab.sh -p scripts/demos/matrice_vel_demo_no_plot.py --viz kit
 """
 
 import argparse
 import copy
 import math
 
-import matplotlib.pyplot as plt
 import torch
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Matrice 350 Lee velocity controller demo.")
+parser = argparse.ArgumentParser(description="Matrice 350 Lee velocity controller demo (no live plot).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -44,17 +43,13 @@ from isaaclab_contrib.controllers.lee_velocity_control_cfg import LeeVelControll
 from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
 
 # ── Test sequence ─────────────────────────────────────────────────────────────
-# Each entry: (duration_s, [vx, vy, vz, yaw_rate_rad_s], phase_label)
-# Commands are in body frame; yaw uses the vehicle frame convention.
 _TEST_SEQUENCE = [
     (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0,  1.0, 0.0], "+vz"),
+    (4.0, [0.5,  0.0,  0.0, 0.0], "+vx"),
     (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0, -1.0, 0.0], "-vz"),
+    (4.0, [-0.5,  0.0,  0.0, 0.0], "-vx"),
     (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [1.0,  0.0,  0.0, 0.0], "+vx"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  1.0,  0.0, 0.0], "+vy"),
+    (4.0, [0.0,  0.5,  0.0, 0.0], "+vy"),
     (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
     (4.0, [0.0,  0.0,  0.0, 0.5], "Yaw"),
     (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
@@ -62,13 +57,6 @@ _TEST_SEQUENCE = [
 
 
 def _build_command_tensor(sequence: list, dt: float, device: str) -> tuple:
-    """Pre-build command tensor and phase boundary list from test sequence.
-
-    Returns:
-        commands: (total_steps, 4) tensor of velocity commands.
-        boundaries: list of (start_step, label) tuples.
-        total_steps: total number of simulation steps.
-    """
     total_steps = sum(int(dur / dt) for dur, _, _ in sequence)
     commands = torch.zeros((total_steps, 4), device=device)
     boundaries = []
@@ -82,14 +70,6 @@ def _build_command_tensor(sequence: list, dt: float, device: str) -> tuple:
 
 
 def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: str) -> None:
-    """Derive Lee controller gains analytically from actual PhysX inertia and apply them.
-
-    Design equations:
-        K_rot    = min(tau_max / (0.5 * I_att), 200)  [motor-saturation-limited]
-        K_angvel = 2 * 0.85 * omega_n * I_att         [zeta = 0.85, near-critical]
-        K_vel    = omega_n                             [1:1 cascade — most aggressive stable ratio]
-        Yaw: K_rot_z = 0.4 * K_rot_xy, same zeta with I_zz
-    """
     m = controller.mass[0].item()
     I_xx = controller.robot_inertia[0, 0, 0].item()
     I_yy = controller.robot_inertia[0, 1, 1].item()
@@ -98,9 +78,6 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
 
     thrust_max = robot_cfg.actuators["thrusters"].thrust_range[1]
     hover_thrust = m * 9.81 / 4.0
-    # tau_max: (thrust headroom) × (sum of all arm contributions on the limiting axis).
-    # For differential thrust each pair contributes, so the correct multiplier is
-    # sum(|arm_i|) per axis — pitch arms are smaller and therefore limit K_rot.
     arm_pitch_sum = sum(abs(v) for v in robot_cfg.allocation_matrix[3])
     arm_roll_sum  = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
     tau_max = (thrust_max - hover_thrust) * min(arm_pitch_sum, arm_roll_sum)
@@ -145,6 +122,60 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     )
 
 
+def _save_plot(t_hist, cmd_v, act_v, roll_hist, pitch_hist,
+               cmd_yaw_hist, act_yaw_hist, cmd_thr_hist, act_thr_hist,
+               phase_boundaries, out_path: str) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_vel, ax_att, ax_yaw, ax_thr) = plt.subplots(4, 1, sharex=True, figsize=(10, 9))
+    fig.suptitle("Matrice 350 — Lee velocity controller (analytically tuned)", fontsize=11)
+
+    for ax, ylabel in zip(
+        (ax_vel, ax_att, ax_yaw, ax_thr),
+        ("Velocity [m/s]", "Attitude [deg]", "Yaw rate [rad/s]", "Thrust [N]"),
+    ):
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+    ax_thr.set_xlabel("Time [s]")
+
+    _C = {"x": "tab:blue", "y": "tab:orange", "z": "tab:green"}
+    for axis in ("x", "y", "z"):
+        ax_vel.plot(t_hist, cmd_v[axis], "--", color=_C[axis], label=f"cmd v{axis}", linewidth=1.2)
+        ax_vel.plot(t_hist, act_v[axis], "-",  color=_C[axis], label=f"act v{axis}", linewidth=1.5)
+    ax_vel.legend(loc="upper right", ncol=3, fontsize=7)
+
+    ax_att.plot(t_hist, roll_hist,  color="tab:red",    label="roll",  linewidth=1.5)
+    ax_att.plot(t_hist, pitch_hist, color="tab:purple", label="pitch", linewidth=1.5)
+    ax_att.legend(loc="upper right", fontsize=7)
+
+    ax_yaw.plot(t_hist, cmd_yaw_hist, "--", color="tab:brown", label="cmd", linewidth=1.2)
+    ax_yaw.plot(t_hist, act_yaw_hist, "-",  color="tab:cyan",  label="act", linewidth=1.5)
+    ax_yaw.legend(loc="upper right", fontsize=7)
+
+    ax_thr.plot(t_hist, cmd_thr_hist, "--", color="tab:olive", label="cmd", linewidth=1.2)
+    ax_thr.plot(t_hist, act_thr_hist, "-",  color="tab:gray",  label="act", linewidth=1.5)
+    ax_thr.legend(loc="upper right", fontsize=7)
+
+    dt = t_hist[1] - t_hist[0] if len(t_hist) > 1 else 0.01
+    for step, label in phase_boundaries:
+        t = step * dt
+        for ax in (ax_vel, ax_att, ax_yaw, ax_thr):
+            ax.axvline(t, color="gray", linewidth=0.8, linestyle=":")
+        if label != "Hover":
+            ax_vel.text(
+                t + 0.05, 1.0, label,
+                transform=ax_vel.get_xaxis_transform(),
+                fontsize=7, color="dimgray", va="top",
+            )
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[INFO] Plot saved to {out_path}")
+
+
 def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.01)
     sim = SimulationContext(sim_cfg)
@@ -164,7 +195,6 @@ def main():
 
     sim.reset()
 
-    # Placeholder cfg — gains are overridden by _compute_and_apply_gains below.
     controller_cfg = LeeVelControllerCfg(
         K_vel_range=((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)),
         K_rot_range=((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)),
@@ -182,41 +212,6 @@ def main():
         _TEST_SEQUENCE, sim_cfg.dt, str(sim.device)
     )
 
-    # ── Matplotlib setup ──────────────────────────────────────────────────────
-    plt.ion()
-    fig, (ax_vel, ax_att, ax_yaw, ax_thr) = plt.subplots(4, 1, sharex=True, figsize=(10, 9))
-    fig.suptitle("Matrice 350 — Lee velocity controller (analytically tuned)", fontsize=11)
-
-    for ax, ylabel in zip(
-        (ax_vel, ax_att, ax_yaw, ax_thr),
-        ("Velocity [m/s]", "Attitude [deg]", "Yaw rate [rad/s]", "Thrust [N]"),
-    ):
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.3)
-    ax_thr.set_xlabel("Time [s]")
-
-    _C = {"x": "tab:blue", "y": "tab:orange", "z": "tab:green"}
-    vel_lines = {}
-    for axis in ("x", "y", "z"):
-        (vel_lines[f"cmd_{axis}"],) = ax_vel.plot([], [], "--", color=_C[axis], label=f"cmd v{axis}", linewidth=1.2)
-        (vel_lines[f"act_{axis}"],) = ax_vel.plot([], [], "-",  color=_C[axis], label=f"act v{axis}", linewidth=1.5)
-    ax_vel.legend(loc="upper right", ncol=3, fontsize=7)
-
-    (line_roll,)  = ax_att.plot([], [], color="tab:red",    label="roll",  linewidth=1.5)
-    (line_pitch,) = ax_att.plot([], [], color="tab:purple", label="pitch", linewidth=1.5)
-    ax_att.legend(loc="upper right", fontsize=7)
-
-    (line_cmd_yaw,) = ax_yaw.plot([], [], "--", color="tab:brown", label="cmd", linewidth=1.2)
-    (line_act_yaw,) = ax_yaw.plot([], [], "-",  color="tab:cyan",  label="act", linewidth=1.5)
-    ax_yaw.legend(loc="upper right", fontsize=7)
-
-    (line_cmd_thr,) = ax_thr.plot([], [], "--", color="tab:olive", label="cmd", linewidth=1.2)
-    (line_act_thr,) = ax_thr.plot([], [], "-",  color="tab:gray",  label="act", linewidth=1.5)
-    ax_thr.legend(loc="upper right", fontsize=7)
-
-    fig.tight_layout()
-    plt.show(block=False)
-
     # ── History buffers ───────────────────────────────────────────────────────
     t_hist = []
     cmd_v = {a: [] for a in ("x", "y", "z")}
@@ -225,16 +220,12 @@ def main():
     cmd_yaw_hist, act_yaw_hist = [], []
     cmd_thr_hist, act_thr_hist = [], []
 
-    phase_step_set = {step for step, _ in phase_boundaries}
-    phase_label_map = dict(phase_boundaries)
-
     # ── Simulation loop ───────────────────────────────────────────────────────
-    print("[INFO] Running test sequence …")
+    print("[INFO] Running test sequence (no live plot) …")
     controller.compute(torch.zeros((1, 4), device=sim.device))
 
     sim_time = 0.0
     step_count = 0
-    plot_interval = 5
 
     while simulation_app.is_running() and step_count < total_steps:
         vel_command = commands[step_count : step_count + 1]
@@ -246,7 +237,6 @@ def main():
         sim.step()
         robot.update(sim_cfg.dt)
 
-        # Record state
         quat_w = controller._to_torch(robot.data.root_quat_w)
         roll_rad, pitch_rad, _ = math_utils.euler_xyz_from_quat(quat_w)
         act_vel_b = robot.data.root_lin_vel_b.torch[0].detach().cpu()
@@ -263,40 +253,15 @@ def main():
         cmd_thr_hist.append(float(thrust_cmd[0].sum().detach().cpu()))
         act_thr_hist.append(float(robot.actuators["thrusters"].applied_thrust[0].sum().detach().cpu()))
 
-        # Draw phase boundary line the first time we hit it
-        if step_count in phase_step_set:
-            label = phase_label_map[step_count]
-            for ax in (ax_vel, ax_att, ax_yaw, ax_thr):
-                ax.axvline(sim_time, color="gray", linewidth=0.8, linestyle=":")
-            if label != "Hover":
-                ax_vel.text(
-                    sim_time + 0.05, 1.0, label,
-                    transform=ax_vel.get_xaxis_transform(),
-                    fontsize=7, color="dimgray", va="top",
-                )
-
-        if step_count % plot_interval == 0:
-            for a in ("x", "y", "z"):
-                vel_lines[f"cmd_{a}"].set_data(t_hist, cmd_v[a])
-                vel_lines[f"act_{a}"].set_data(t_hist, act_v[a])
-            line_roll.set_data(t_hist, roll_hist)
-            line_pitch.set_data(t_hist, pitch_hist)
-            line_cmd_yaw.set_data(t_hist, cmd_yaw_hist)
-            line_act_yaw.set_data(t_hist, act_yaw_hist)
-            line_cmd_thr.set_data(t_hist, cmd_thr_hist)
-            line_act_thr.set_data(t_hist, act_thr_hist)
-            for ax in (ax_vel, ax_att, ax_yaw, ax_thr):
-                ax.relim()
-                ax.autoscale_view()
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
-
         sim_time += sim_cfg.dt
         step_count += 1
 
-    print("[INFO] Sequence complete. Close the plot window to exit.")
-    plt.ioff()
-    plt.show(block=True)
+    print("[INFO] Sequence complete. Generating plot …")
+    _save_plot(
+        t_hist, cmd_v, act_v, roll_hist, pitch_hist,
+        cmd_yaw_hist, act_yaw_hist, cmd_thr_hist, act_thr_hist,
+        phase_boundaries, "matrice_vel_demo_results.png",
+    )
     simulation_app.close()
 
 
