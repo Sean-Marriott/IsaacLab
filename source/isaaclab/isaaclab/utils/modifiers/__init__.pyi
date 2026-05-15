@@ -7,14 +7,16 @@ __all__ = [
     "ModifierCfg",
     "DigitalFilterCfg",
     "IntegratorCfg",
+    "DelayedObservationCfg",
     "ModifierBase",
     "DigitalFilter",
     "Integrator",
+    "DelayedObservation",
     "bias",
     "clip",
     "scale",
 ]
 
-from .modifier_cfg import ModifierCfg, DigitalFilterCfg, IntegratorCfg
+from .modifier_cfg import ModifierCfg, DigitalFilterCfg, IntegratorCfg, DelayedObservationCfg
 from .modifier_base import ModifierBase
-from .modifier import DigitalFilter, Integrator, bias, clip, scale
+from .modifier import DigitalFilter, Integrator, DelayedObservation, bias, clip, scale

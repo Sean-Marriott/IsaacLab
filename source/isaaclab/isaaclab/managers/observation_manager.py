@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from prettytable import PrettyTable
 
-from isaaclab.utils import class_to_dict, modifiers, noise
+from isaaclab.utils import class_to_dict, modifiers, noise, string_to_callable
 from isaaclab.utils.buffers import CircularBuffer
 
 from .manager_base import ManagerBase, ManagerTermBase
@@ -581,6 +581,9 @@ class ObservationManager(ManagerBase):
                     for mod_cfg in term_cfg.modifiers:
                         # check if class modifier and initialize with observation size when adding
                         if isinstance(mod_cfg, modifiers.ModifierCfg):
+                            # resolve string references (e.g. ResolvableString from configclass)
+                            if isinstance(mod_cfg.func, str):
+                                mod_cfg.func = string_to_callable(mod_cfg.func)
                             # to list of modifiers - instantiate class-based modifiers
                             if inspect.isclass(mod_cfg.func):
                                 mod_cfg.func = mod_cfg.func(cfg=mod_cfg, data_dim=obs_dims, device=self._env.device)
@@ -609,13 +612,19 @@ class ObservationManager(ManagerBase):
                         #                 1. modifier specific check can be done in the modifier class
                         #                 2. general param vs function matching check can be a common utility
                         # check if term's arguments are matched by params
+                        _var_kinds = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
                         term_params = list(mod_cfg.params.keys())
                         args = inspect.signature(mod_cfg.func).parameters
-                        args_with_defaults = [arg for arg in args if args[arg].default is not inspect.Parameter.empty]
-                        args_without_defaults = [arg for arg in args if args[arg].default is inspect.Parameter.empty]
+                        args_with_defaults = [
+                            arg for arg in args
+                            if args[arg].default is not inspect.Parameter.empty and args[arg].kind not in _var_kinds
+                        ]
+                        args_without_defaults = [
+                            arg for arg in args
+                            if args[arg].default is inspect.Parameter.empty and args[arg].kind not in _var_kinds
+                        ]
                         args = args_without_defaults + args_with_defaults
-                        # ignore first two arguments for env and env_ids
-                        # Think: Check for cases when kwargs are set inside the function?
+                        # ignore the first argument (data tensor passed by the manager)
                         if len(args) > 1:
                             if set(args[1:]) != set(term_params + args_with_defaults):
                                 raise ValueError(
