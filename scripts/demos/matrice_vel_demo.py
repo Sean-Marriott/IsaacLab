@@ -12,6 +12,7 @@ PhysX inertia at startup so the script adapts automatically to model changes.
 
 Launch:
     ./isaaclab.sh -p scripts/demos/matrice_vel_demo.py --viz kit
+    ./isaaclab.sh -p scripts/demos/matrice_vel_demo.py --robot clean --cascade_ratio 3.2
 """
 
 import argparse
@@ -24,6 +25,23 @@ import torch
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Matrice 350 Lee velocity controller demo.")
+parser.add_argument(
+    "--robot",
+    type=str,
+    default="chainsaw",
+    choices=["chainsaw", "clean"],
+    help="Which M350 model to fly: 'chainsaw' (MATRICE_CFG, 8.665 kg) or 'clean' (MATRICE_CLEAN_CFG, 6.5 kg).",
+)
+parser.add_argument(
+    "--cascade_ratio",
+    type=float,
+    default=1.0,
+    help=(
+        "Separation between the attitude and velocity loops: K_vel_xy = omega_n_att / cascade_ratio."
+        " 1.0 reproduces the original 1:1 rule, which is only sane for the high-inertia chainsaw model;"
+        " use ~3.2 for the clean airframe."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -41,23 +59,26 @@ from isaaclab.sim import SimulationContext
 from isaaclab_contrib.assets import Multirotor
 from isaaclab_contrib.controllers.lee_velocity_control import LeeVelController
 from isaaclab_contrib.controllers.lee_velocity_control_cfg import LeeVelControllerCfg
-from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
+
+from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG, MATRICE_CLEAN_CFG
+
+_ROBOT_CFGS = {"chainsaw": MATRICE_CFG, "clean": MATRICE_CLEAN_CFG}
 
 # ── Test sequence ─────────────────────────────────────────────────────────────
 # Each entry: (duration_s, [vx, vy, vz, yaw_rate_rad_s], phase_label)
 # Commands are in body frame; yaw uses the vehicle frame convention.
 _TEST_SEQUENCE = [
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0,  1.0, 0.0], "+vz"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0, -1.0, 0.0], "-vz"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [1.0,  0.0,  0.0, 0.0], "+vx"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  1.0,  0.0, 0.0], "+vy"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0,  0.0, 0.5], "Yaw"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 0.0, 1.0, 0.0], "+vz"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 0.0, -1.0, 0.0], "-vz"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [1.0, 0.0, 0.0, 0.0], "+vx"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 1.0, 0.0, 0.0], "+vy"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 0.0, 0.0, 0.5], "Yaw"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
 ]
 
 
@@ -81,14 +102,21 @@ def _build_command_tensor(sequence: list, dt: float, device: str) -> tuple:
     return commands, boundaries, total_steps
 
 
-def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: str) -> None:
+def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: str, cascade_ratio: float = 1.0) -> None:
     """Derive Lee controller gains analytically from actual PhysX inertia and apply them.
 
     Design equations:
         K_rot    = min(tau_max / (0.5 * I_att), 200)  [motor-saturation-limited]
         K_angvel = 2 * 0.85 * omega_n * I_att         [zeta = 0.85, near-critical]
-        K_vel    = omega_n                             [1:1 cascade — most aggressive stable ratio]
+        K_vel    = omega_n / cascade_ratio
         Yaw: K_rot_z = 0.4 * K_rot_xy, same zeta with I_zz
+
+    ``cascade_ratio = 1.0`` is the original 1:1 rule.  It only produces a usable ``K_vel`` when the
+    attitude inertia is large: on the chainsaw model (I_att = 2.65) it gives 3.5, but on the clean
+    airframe (I_att = 0.77) it gives 12.9, i.e. 53 deg of commanded tilt per m/s of velocity error.
+    Note that ``LeeVelController`` does not clamp the commanded acceleration by
+    ``max_inclination_angle_rad``, so an over-large ``K_vel`` translates directly into flips.
+    Use a ratio around 3.2 (tau_vel = 0.25 s) for the clean airframe.
     """
     m = controller.mass[0].item()
     I_xx = controller.robot_inertia[0, 0, 0].item()
@@ -102,7 +130,7 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     # For differential thrust each pair contributes, so the correct multiplier is
     # sum(|arm_i|) per axis — pitch arms are smaller and therefore limit K_rot.
     arm_pitch_sum = sum(abs(v) for v in robot_cfg.allocation_matrix[3])
-    arm_roll_sum  = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
+    arm_roll_sum = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
     tau_max = (thrust_max - hover_thrust) * min(arm_pitch_sum, arm_roll_sum)
 
     K_rot_att = min(tau_max / (0.5 * I_att), 200.0)
@@ -113,13 +141,14 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     omega_n_z = (K_rot_z / I_zz) ** 0.5
     K_angvel_z = 2.0 * 0.85 * omega_n_z * I_zz
 
-    # Match inner-loop bandwidth: velocity loop at 1:1 cascade ratio is the most aggressive
-    # setting that doesn't drive the outer loop faster than the attitude loop can follow.
-    K_vel_xy = omega_n_att
-    K_vel_z = omega_n_att * 0.6
+    # Separate the outer velocity loop from the attitude loop by ``cascade_ratio``.
+    K_vel_xy = omega_n_att / cascade_ratio
+    K_vel_z = K_vel_xy * 0.6
 
     k_f_lo, k_f_hi = robot_cfg.actuators["thrusters"].thrust_const_range
     hover_rps = (hover_thrust / ((k_f_lo + k_f_hi) / 2.0)) ** 0.5
+
+    max_tilt_per_ms = math.degrees(math.atan(K_vel_xy / 9.81))
 
     print(f"\n{'=' * 60}")
     print(f"Matrice model:  mass = {m:.4f} kg")
@@ -129,20 +158,18 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     print(f"Attitude inner loop  (ω_n = {omega_n_att:.3f} rad/s, ζ = 0.85):")
     print(f"  K_rot_xy   = {K_rot_att:.4f}    K_angvel_xy = {K_angvel_att:.4f}")
     print(f"  K_rot_z    = {K_rot_z:.4f}    K_angvel_z  = {K_angvel_z:.4f}")
-    print(f"Velocity outer loop  (τ_vel = {1/K_vel_xy:.3f} s >> τ_att = {1/omega_n_att:.3f} s):")
+    print(
+        f"Velocity outer loop  (cascade ratio {cascade_ratio:.2f}, τ_vel = {1 / K_vel_xy:.3f} s"
+        f" vs τ_att = {1 / omega_n_att:.3f} s):"
+    )
     print(f"  K_vel_xy   = {K_vel_xy:.4f}    K_vel_z     = {K_vel_z:.4f}")
-    print(f"Recommended MATRICE_CFG init_state rps = {hover_rps:.2f}")
+    print(f"  commanded tilt per m/s of velocity error = {max_tilt_per_ms:.1f} deg")
+    print(f"Recommended init_state rps = {hover_rps:.2f}")
     print(f"{'=' * 60}\n")
 
-    controller.K_rot_current[:] = torch.tensor(
-        [[K_rot_att, K_rot_att, K_rot_z]], device=device
-    )
-    controller.K_angvel_current[:] = torch.tensor(
-        [[K_angvel_att, K_angvel_att, K_angvel_z]], device=device
-    )
-    controller.K_vel_current[:] = torch.tensor(
-        [[K_vel_xy, K_vel_xy, K_vel_z]], device=device
-    )
+    controller.K_rot_current[:] = torch.tensor([[K_rot_att, K_rot_att, K_rot_z]], device=device)
+    controller.K_angvel_current[:] = torch.tensor([[K_angvel_att, K_angvel_att, K_angvel_z]], device=device)
+    controller.K_vel_current[:] = torch.tensor([[K_vel_xy, K_vel_xy, K_vel_z]], device=device)
 
 
 def main():
@@ -156,7 +183,7 @@ def main():
 
     sim_utils.GroundPlaneCfg().func("/World/defaultGroundPlane", sim_utils.GroundPlaneCfg())
 
-    robot_cfg = copy.deepcopy(MATRICE_CFG)
+    robot_cfg = copy.deepcopy(_ROBOT_CFGS[args_cli.robot])
     robot_cfg.prim_path = "/World/Robot"
     robot_cfg.init_state.pos = (0.0, 0.0, 10.0)
     robot_cfg.actuators["thrusters"].dt = sim_cfg.dt
@@ -173,14 +200,12 @@ def main():
         max_yaw_rate=1.0471975511965976,
     )
     controller = LeeVelController(controller_cfg, robot, num_envs=1, device=str(sim.device))
-    _compute_and_apply_gains(controller, robot_cfg, str(sim.device))
+    _compute_and_apply_gains(controller, robot_cfg, str(sim.device), args_cli.cascade_ratio)
 
     alloc = torch.tensor(robot_cfg.allocation_matrix, device=sim.device, dtype=torch.float32)
     alloc_pinv = torch.linalg.pinv(alloc)
 
-    commands, phase_boundaries, total_steps = _build_command_tensor(
-        _TEST_SEQUENCE, sim_cfg.dt, str(sim.device)
-    )
+    commands, phase_boundaries, total_steps = _build_command_tensor(_TEST_SEQUENCE, sim_cfg.dt, str(sim.device))
 
     # ── Matplotlib setup ──────────────────────────────────────────────────────
     plt.ion()
@@ -199,19 +224,19 @@ def main():
     vel_lines = {}
     for axis in ("x", "y", "z"):
         (vel_lines[f"cmd_{axis}"],) = ax_vel.plot([], [], "--", color=_C[axis], label=f"cmd v{axis}", linewidth=1.2)
-        (vel_lines[f"act_{axis}"],) = ax_vel.plot([], [], "-",  color=_C[axis], label=f"act v{axis}", linewidth=1.5)
+        (vel_lines[f"act_{axis}"],) = ax_vel.plot([], [], "-", color=_C[axis], label=f"act v{axis}", linewidth=1.5)
     ax_vel.legend(loc="upper right", ncol=3, fontsize=7)
 
-    (line_roll,)  = ax_att.plot([], [], color="tab:red",    label="roll",  linewidth=1.5)
+    (line_roll,) = ax_att.plot([], [], color="tab:red", label="roll", linewidth=1.5)
     (line_pitch,) = ax_att.plot([], [], color="tab:purple", label="pitch", linewidth=1.5)
     ax_att.legend(loc="upper right", fontsize=7)
 
     (line_cmd_yaw,) = ax_yaw.plot([], [], "--", color="tab:brown", label="cmd", linewidth=1.2)
-    (line_act_yaw,) = ax_yaw.plot([], [], "-",  color="tab:cyan",  label="act", linewidth=1.5)
+    (line_act_yaw,) = ax_yaw.plot([], [], "-", color="tab:cyan", label="act", linewidth=1.5)
     ax_yaw.legend(loc="upper right", fontsize=7)
 
     (line_cmd_thr,) = ax_thr.plot([], [], "--", color="tab:olive", label="cmd", linewidth=1.2)
-    (line_act_thr,) = ax_thr.plot([], [], "-",  color="tab:gray",  label="act", linewidth=1.5)
+    (line_act_thr,) = ax_thr.plot([], [], "-", color="tab:gray", label="act", linewidth=1.5)
     ax_thr.legend(loc="upper right", fontsize=7)
 
     fig.tight_layout()
@@ -270,9 +295,13 @@ def main():
                 ax.axvline(sim_time, color="gray", linewidth=0.8, linestyle=":")
             if label != "Hover":
                 ax_vel.text(
-                    sim_time + 0.05, 1.0, label,
+                    sim_time + 0.05,
+                    1.0,
+                    label,
                     transform=ax_vel.get_xaxis_transform(),
-                    fontsize=7, color="dimgray", va="top",
+                    fontsize=7,
+                    color="dimgray",
+                    va="top",
                 )
 
         if step_count % plot_interval == 0:

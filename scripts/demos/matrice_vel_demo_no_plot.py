@@ -12,6 +12,7 @@ sequence completes the full plot is rendered once and saved to
 
 Launch:
     ./isaaclab.sh -p scripts/demos/matrice_vel_demo_no_plot.py --viz kit
+    ./isaaclab.sh -p scripts/demos/matrice_vel_demo_no_plot.py --robot clean --cascade_ratio 3.2
 """
 
 import argparse
@@ -23,6 +24,23 @@ import torch
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Matrice 350 Lee velocity controller demo (no live plot).")
+parser.add_argument(
+    "--robot",
+    type=str,
+    default="chainsaw",
+    choices=["chainsaw", "clean"],
+    help="Which M350 model to fly: 'chainsaw' (MATRICE_CFG, 8.665 kg) or 'clean' (MATRICE_CLEAN_CFG, 6.5 kg).",
+)
+parser.add_argument(
+    "--cascade_ratio",
+    type=float,
+    default=1.0,
+    help=(
+        "Separation between the attitude and velocity loops: K_vel_xy = omega_n_att / cascade_ratio."
+        " 1.0 reproduces the original 1:1 rule, which is only sane for the high-inertia chainsaw model;"
+        " use ~3.2 for the clean airframe."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -40,19 +58,22 @@ from isaaclab.sim import SimulationContext
 from isaaclab_contrib.assets import Multirotor
 from isaaclab_contrib.controllers.lee_velocity_control import LeeVelController
 from isaaclab_contrib.controllers.lee_velocity_control_cfg import LeeVelControllerCfg
-from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
+
+from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG, MATRICE_CLEAN_CFG
+
+_ROBOT_CFGS = {"chainsaw": MATRICE_CFG, "clean": MATRICE_CLEAN_CFG}
 
 # ── Test sequence ─────────────────────────────────────────────────────────────
 _TEST_SEQUENCE = [
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.5,  0.0,  0.0, 0.0], "+vx"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [-0.5,  0.0,  0.0, 0.0], "-vx"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.5,  0.0, 0.0], "+vy"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
-    (4.0, [0.0,  0.0,  0.0, 0.5], "Yaw"),
-    (2.0, [0.0,  0.0,  0.0, 0.0], "Hover"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.5, 0.0, 0.0, 0.0], "+vx"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [-0.5, 0.0, 0.0, 0.0], "-vx"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 0.5, 0.0, 0.0], "+vy"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
+    (4.0, [0.0, 0.0, 0.0, 0.5], "Yaw"),
+    (2.0, [0.0, 0.0, 0.0, 0.0], "Hover"),
 ]
 
 
@@ -69,7 +90,7 @@ def _build_command_tensor(sequence: list, dt: float, device: str) -> tuple:
     return commands, boundaries, total_steps
 
 
-def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: str) -> None:
+def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: str, cascade_ratio: float = 1.0) -> None:
     m = controller.mass[0].item()
     I_xx = controller.robot_inertia[0, 0, 0].item()
     I_yy = controller.robot_inertia[0, 1, 1].item()
@@ -79,7 +100,7 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     thrust_max = robot_cfg.actuators["thrusters"].thrust_range[1]
     hover_thrust = m * 9.81 / 4.0
     arm_pitch_sum = sum(abs(v) for v in robot_cfg.allocation_matrix[3])
-    arm_roll_sum  = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
+    arm_roll_sum = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
     tau_max = (thrust_max - hover_thrust) * min(arm_pitch_sum, arm_roll_sum)
 
     K_rot_att = min(tau_max / (0.5 * I_att), 200.0)
@@ -90,10 +111,9 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     omega_n_z = (K_rot_z / I_zz) ** 0.5
     K_angvel_z = 2.0 * 0.85 * omega_n_z * I_zz
 
-    # Match inner-loop bandwidth: velocity loop at 1:1 cascade ratio is the most aggressive
-    # setting that doesn't drive the outer loop faster than the attitude loop can follow.
-    K_vel_xy = omega_n_att
-    K_vel_z = omega_n_att * 0.6
+    # Separate the outer velocity loop from the attitude loop by ``cascade_ratio``.
+    K_vel_xy = omega_n_att / cascade_ratio
+    K_vel_z = K_vel_xy * 0.6
 
     k_f_lo, k_f_hi = robot_cfg.actuators["thrusters"].thrust_const_range
     hover_rps = (hover_thrust / ((k_f_lo + k_f_hi) / 2.0)) ** 0.5
@@ -106,26 +126,35 @@ def _compute_and_apply_gains(controller: LeeVelController, robot_cfg, device: st
     print(f"Attitude inner loop  (ω_n = {omega_n_att:.3f} rad/s, ζ = 0.85):")
     print(f"  K_rot_xy   = {K_rot_att:.4f}    K_angvel_xy = {K_angvel_att:.4f}")
     print(f"  K_rot_z    = {K_rot_z:.4f}    K_angvel_z  = {K_angvel_z:.4f}")
-    print(f"Velocity outer loop  (τ_vel = {1/K_vel_xy:.3f} s >> τ_att = {1/omega_n_att:.3f} s):")
+    print(
+        f"Velocity outer loop  (cascade ratio {cascade_ratio:.2f}, τ_vel = {1 / K_vel_xy:.3f} s"
+        f" vs τ_att = {1 / omega_n_att:.3f} s):"
+    )
     print(f"  K_vel_xy   = {K_vel_xy:.4f}    K_vel_z     = {K_vel_z:.4f}")
-    print(f"Recommended MATRICE_CFG init_state rps = {hover_rps:.2f}")
+    print(f"  commanded tilt per m/s of velocity error = {math.degrees(math.atan(K_vel_xy / 9.81)):.1f} deg")
+    print(f"Recommended init_state rps = {hover_rps:.2f}")
     print(f"{'=' * 60}\n")
 
-    controller.K_rot_current[:] = torch.tensor(
-        [[K_rot_att, K_rot_att, K_rot_z]], device=device
-    )
-    controller.K_angvel_current[:] = torch.tensor(
-        [[K_angvel_att, K_angvel_att, K_angvel_z]], device=device
-    )
-    controller.K_vel_current[:] = torch.tensor(
-        [[K_vel_xy, K_vel_xy, K_vel_z]], device=device
-    )
+    controller.K_rot_current[:] = torch.tensor([[K_rot_att, K_rot_att, K_rot_z]], device=device)
+    controller.K_angvel_current[:] = torch.tensor([[K_angvel_att, K_angvel_att, K_angvel_z]], device=device)
+    controller.K_vel_current[:] = torch.tensor([[K_vel_xy, K_vel_xy, K_vel_z]], device=device)
 
 
-def _save_plot(t_hist, cmd_v, act_v, roll_hist, pitch_hist,
-               cmd_yaw_hist, act_yaw_hist, cmd_thr_hist, act_thr_hist,
-               phase_boundaries, out_path: str) -> None:
+def _save_plot(
+    t_hist,
+    cmd_v,
+    act_v,
+    roll_hist,
+    pitch_hist,
+    cmd_yaw_hist,
+    act_yaw_hist,
+    cmd_thr_hist,
+    act_thr_hist,
+    phase_boundaries,
+    out_path: str,
+) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -143,19 +172,19 @@ def _save_plot(t_hist, cmd_v, act_v, roll_hist, pitch_hist,
     _C = {"x": "tab:blue", "y": "tab:orange", "z": "tab:green"}
     for axis in ("x", "y", "z"):
         ax_vel.plot(t_hist, cmd_v[axis], "--", color=_C[axis], label=f"cmd v{axis}", linewidth=1.2)
-        ax_vel.plot(t_hist, act_v[axis], "-",  color=_C[axis], label=f"act v{axis}", linewidth=1.5)
+        ax_vel.plot(t_hist, act_v[axis], "-", color=_C[axis], label=f"act v{axis}", linewidth=1.5)
     ax_vel.legend(loc="upper right", ncol=3, fontsize=7)
 
-    ax_att.plot(t_hist, roll_hist,  color="tab:red",    label="roll",  linewidth=1.5)
+    ax_att.plot(t_hist, roll_hist, color="tab:red", label="roll", linewidth=1.5)
     ax_att.plot(t_hist, pitch_hist, color="tab:purple", label="pitch", linewidth=1.5)
     ax_att.legend(loc="upper right", fontsize=7)
 
     ax_yaw.plot(t_hist, cmd_yaw_hist, "--", color="tab:brown", label="cmd", linewidth=1.2)
-    ax_yaw.plot(t_hist, act_yaw_hist, "-",  color="tab:cyan",  label="act", linewidth=1.5)
+    ax_yaw.plot(t_hist, act_yaw_hist, "-", color="tab:cyan", label="act", linewidth=1.5)
     ax_yaw.legend(loc="upper right", fontsize=7)
 
     ax_thr.plot(t_hist, cmd_thr_hist, "--", color="tab:olive", label="cmd", linewidth=1.2)
-    ax_thr.plot(t_hist, act_thr_hist, "-",  color="tab:gray",  label="act", linewidth=1.5)
+    ax_thr.plot(t_hist, act_thr_hist, "-", color="tab:gray", label="act", linewidth=1.5)
     ax_thr.legend(loc="upper right", fontsize=7)
 
     dt = t_hist[1] - t_hist[0] if len(t_hist) > 1 else 0.01
@@ -165,9 +194,13 @@ def _save_plot(t_hist, cmd_v, act_v, roll_hist, pitch_hist,
             ax.axvline(t, color="gray", linewidth=0.8, linestyle=":")
         if label != "Hover":
             ax_vel.text(
-                t + 0.05, 1.0, label,
+                t + 0.05,
+                1.0,
+                label,
                 transform=ax_vel.get_xaxis_transform(),
-                fontsize=7, color="dimgray", va="top",
+                fontsize=7,
+                color="dimgray",
+                va="top",
             )
 
     fig.tight_layout()
@@ -187,7 +220,7 @@ def main():
 
     sim_utils.GroundPlaneCfg().func("/World/defaultGroundPlane", sim_utils.GroundPlaneCfg())
 
-    robot_cfg = copy.deepcopy(MATRICE_CFG)
+    robot_cfg = copy.deepcopy(_ROBOT_CFGS[args_cli.robot])
     robot_cfg.prim_path = "/World/Robot"
     robot_cfg.init_state.pos = (0.0, 0.0, 10.0)
     robot_cfg.actuators["thrusters"].dt = sim_cfg.dt
@@ -203,14 +236,12 @@ def main():
         max_yaw_rate=1.0471975511965976,
     )
     controller = LeeVelController(controller_cfg, robot, num_envs=1, device=str(sim.device))
-    _compute_and_apply_gains(controller, robot_cfg, str(sim.device))
+    _compute_and_apply_gains(controller, robot_cfg, str(sim.device), args_cli.cascade_ratio)
 
     alloc = torch.tensor(robot_cfg.allocation_matrix, device=sim.device, dtype=torch.float32)
     alloc_pinv = torch.linalg.pinv(alloc)
 
-    commands, phase_boundaries, total_steps = _build_command_tensor(
-        _TEST_SEQUENCE, sim_cfg.dt, str(sim.device)
-    )
+    commands, phase_boundaries, total_steps = _build_command_tensor(_TEST_SEQUENCE, sim_cfg.dt, str(sim.device))
 
     # ── History buffers ───────────────────────────────────────────────────────
     t_hist = []
@@ -258,9 +289,17 @@ def main():
 
     print("[INFO] Sequence complete. Generating plot …")
     _save_plot(
-        t_hist, cmd_v, act_v, roll_hist, pitch_hist,
-        cmd_yaw_hist, act_yaw_hist, cmd_thr_hist, act_thr_hist,
-        phase_boundaries, "matrice_vel_demo_results.png",
+        t_hist,
+        cmd_v,
+        act_v,
+        roll_hist,
+        pitch_hist,
+        cmd_yaw_hist,
+        act_yaw_hist,
+        cmd_thr_hist,
+        act_thr_hist,
+        phase_boundaries,
+        "matrice_vel_demo_results.png",
     )
     simulation_app.close()
 
