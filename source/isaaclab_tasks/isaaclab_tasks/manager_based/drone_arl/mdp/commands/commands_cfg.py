@@ -14,6 +14,7 @@ from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
     from .drone_pose_command import DroneUniformPoseCommand
+    from .test_shape_command import DroneTestShapeCommand
     from .trajectory_command import DroneTrajectoryCommand
 
 
@@ -235,4 +236,56 @@ class DroneTrajectoryCommandCfg(CommandTermCfg):
     names a termination term and gives it its own colour; a term that is active but unlisted falls
     back to the first prototype. Keys that name no active term are simply never selected, so the
     default palette is safe to leave in place for a task with a different termination set.
+    """
+
+
+@configclass
+class DroneTestShapeCommandCfg(DroneTrajectoryCommandCfg):
+    """Configuration for the deterministic geometric test-figure command generator.
+
+    The simulator-side counterpart of ``dji_tap_and_go/generate_test_trajectory.py``: the same
+    square / circle / line / zigzag figures, at the same ``size`` and cruise ``speed``, so a policy
+    can be scored on identical shapes in simulation and on the vehicle.
+
+    Inherited from :class:`DroneTrajectoryCommandCfg` and **ignored** here, because the figures are
+    fixed rather than sampled: :attr:`~DroneTrajectoryCommandCfg.ranges`,
+    :attr:`~DroneTrajectoryCommandCfg.difficulty`,
+    :attr:`~DroneTrajectoryCommandCfg.axis_weights`,
+    :attr:`~DroneTrajectoryCommandCfg.harmonic_multiplier_ranges`,
+    :attr:`~DroneTrajectoryCommandCfg.harmonic_amplitude_ranges` and
+    :attr:`~DroneTrajectoryCommandCfg.omega_min`. Everything else -- the look-ahead times, the yaw
+    mode, and all of the visualizer settings -- applies unchanged.
+    """
+
+    class_type: type["DroneTestShapeCommand"] | str = "{DIR}.test_shape_command:DroneTestShapeCommand"
+
+    shapes: tuple[str, ...] = ("square", "circle", "line", "zigzag")
+    """Figures to fly, dealt out over the environments by index.
+
+    Environment ``i`` flies ``shapes[i % len(shapes)]``, so one run covers every figure at once and
+    a given figure lands in the same environment every run -- which is what makes two runs
+    comparable. Narrow this to a single entry to put every environment on one shape.
+    """
+
+    size: float = 1.5
+    """Characteristic size of the figure [m]: side length, diameter, or length along x.
+
+    Matches the ``--size`` default of the ROS tool. Note that the drone is spawned onto the
+    reference, so the figure is centred on the environment origin rather than hung off wherever the
+    drone happens to be, as it is on the vehicle.
+    """
+
+    speed: float = 0.5
+    """Target mean speed along the figure [m/s], matching the ROS tool's ``--max-speed`` default.
+
+    This sets the lap period as ``perimeter / speed``. Only the *mean* over a lap is held: a
+    truncated figure slows into its corners and speeds up along its edges. Keep it inside the
+    envelope the policy was trained on -- a reference faster than the training ``vel_cap`` is
+    out of distribution and will not be tracked well however good the policy is.
+    """
+
+    num_points: int = 8
+    """Number of segments in the ``zigzag``, matching the ROS tool's ``--num-points`` default.
+
+    Unused by the other figures, whose vertex count is fixed by their geometry.
     """
