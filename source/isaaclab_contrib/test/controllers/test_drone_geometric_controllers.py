@@ -76,6 +76,7 @@ class _DummySimCfg:
 
     def __init__(self):
         self.gravity = (0.0, 0.0, -9.81)
+        self.dt = 0.01
 
 
 class _DummySimContext:
@@ -342,6 +343,129 @@ def test_lee_att_randomize_params_within_bounds(
     )
     assert torch.all(K_angvel_current <= K_angvel_max), (
         f"K_angvel above maximum: {K_angvel_current.max()} > {K_angvel_max.max()}"
+    )
+
+
+def _make_vel_controller(monkeypatch, device, num_envs, K_vel_int_range=None, max_integral_acc=2.0):
+    """Build a velocity controller on the stub robot, optionally with integral action."""
+    _patch_aggregate(monkeypatch, vel_mod, num_envs, device)
+    _patch_sim_context(monkeypatch, vel_mod)
+    cfg = _create_vel_cfg()
+    if K_vel_int_range is not None:
+        cfg.K_vel_int_range = K_vel_int_range
+    cfg.max_integral_acc = max_integral_acc
+    robot = _DummyRobot(num_envs, 1, device)
+    return cfg, vel_mod.LeeVelController(cfg, robot, num_envs=num_envs, device=str(device))
+
+
+@pytest.mark.parametrize("device_str", ["cpu", "cuda"])
+def test_lee_vel_integral_disabled_by_default(monkeypatch: pytest.MonkeyPatch, device_str: str):
+    """With the default config the controller is purely proportional and holds no integral state."""
+    device = _device_param(device_str)
+    num_envs = 4
+    cfg, controller = _make_vel_controller(monkeypatch, device, num_envs)
+
+    assert cfg.K_vel_int_range == ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), "Integral action must be opt-in"
+
+    # A standing velocity error, held for many control steps.
+    command = torch.zeros((num_envs, 4), device=device)
+    command[:, 2] = 1.0
+    first = controller.compute(command)[:, 2].clone()
+    for _ in range(200):
+        wrench = controller.compute(command)
+
+    assert torch.allclose(controller.vel_error_integral, torch.zeros_like(controller.vel_error_integral)), (
+        "Integral state accumulated while integral action was disabled"
+    )
+    assert torch.allclose(wrench[:, 2], first), "Purely proportional output drifted over repeated steps"
+
+
+@pytest.mark.parametrize("device_str", ["cpu", "cuda"])
+def test_lee_vel_integral_rejects_standing_error(monkeypatch: pytest.MonkeyPatch, device_str: str):
+    """Integral action grows the vertical force while a velocity error persists, and stays bounded.
+
+    This is the property the purely proportional controller lacks: without it a steady disturbance
+    leaves a standing velocity error for the outer loop to absorb as a constant command offset.
+    """
+    device = _device_param(device_str)
+    num_envs = 4
+    K_i = 2.5
+    max_integral_acc = 2.0
+    cfg, controller = _make_vel_controller(
+        monkeypatch, device, num_envs, ((0.0, 0.0, K_i), (0.0, 0.0, K_i)), max_integral_acc
+    )
+
+    command = torch.zeros((num_envs, 4), device=device)
+    command[:, 2] = 1.0  # stub robot never moves, so the error never goes away
+
+    first = controller.compute(command)[:, 2].clone()
+    for _ in range(10):
+        controller.compute(command)
+    grown = controller.compute(command)[:, 2].clone()
+
+    assert torch.all(grown > first), "Integral term did not build against a standing velocity error"
+
+    # Anti-windup: the contribution saturates at max_integral_acc rather than growing without bound.
+    for _ in range(2000):
+        controller.compute(command)
+    contribution = (controller.K_vel_int_current * controller.vel_error_integral)[:, 2]
+    assert torch.all(contribution <= max_integral_acc + 1e-4), (
+        f"Integral contribution {contribution.max()} exceeded the {max_integral_acc} m/s^2 bound"
+    )
+    assert torch.all(contribution > 0.9 * max_integral_acc), "Integral did not reach its bound when held saturated"
+
+    # Reset must clear the state, or one episode's correction leaks into the next.
+    controller.reset_idx(env_ids=None)
+    assert torch.allclose(controller.vel_error_integral, torch.zeros_like(controller.vel_error_integral)), (
+        "Integral state survived a reset"
+    )
+
+
+@pytest.mark.parametrize("device_str", ["cpu", "cuda"])
+def test_lee_vel_integral_lateral_axes(monkeypatch: pytest.MonkeyPatch, device_str: str):
+    """Integral action works per-axis on x and y, with the same bound and no cross-coupling.
+
+    The vertical axis is covered above; this pins the lateral behaviour separately because it is
+    the one that reaches the vehicle through the attitude loop rather than through thrust, and
+    because a per-axis gain vector is easy to accidentally collapse to a scalar.
+    """
+    device = _device_param(device_str)
+    num_envs = 4
+    K_i = 1.5
+    max_integral_acc = 2.0
+    _, controller = _make_vel_controller(
+        monkeypatch, device, num_envs, ((K_i, K_i, 0.0), (K_i, K_i, 0.0)), max_integral_acc
+    )
+
+    # Command +x only. The stub robot never moves, so the x error persists and y stays exactly zero.
+    command = torch.zeros((num_envs, 4), device=device)
+    command[:, 0] = 1.0
+
+    for _ in range(10):
+        controller.compute(command)
+    assert torch.all(controller.vel_error_integral[:, 0] > 0.0), "x integral did not build against a standing error"
+    assert torch.allclose(controller.vel_error_integral[:, 1], torch.zeros(num_envs, device=device)), (
+        "y integral moved on an x-only error -- the axes are coupled"
+    )
+
+    # Anti-windup applies per axis, not just on z.
+    for _ in range(2000):
+        controller.compute(command)
+    contribution = (controller.K_vel_int_current * controller.vel_error_integral)[:, 0]
+    assert torch.all(contribution <= max_integral_acc + 1e-4), (
+        f"Lateral integral contribution {contribution.max()} exceeded the {max_integral_acc} m/s^2 bound"
+    )
+    assert torch.all(contribution > 0.9 * max_integral_acc), "Lateral integral did not reach its bound when saturated"
+
+    # A y-only command builds the other axis, confirming the gain vector is honoured on both.
+    controller.reset_idx(env_ids=None)
+    command = torch.zeros((num_envs, 4), device=device)
+    command[:, 1] = 1.0
+    for _ in range(10):
+        controller.compute(command)
+    assert torch.all(controller.vel_error_integral[:, 1] > 0.0), "y integral did not build against a standing error"
+    assert torch.allclose(controller.vel_error_integral[:, 0], torch.zeros(num_envs, device=device)), (
+        "x integral moved on a y-only error -- the axes are coupled"
     )
 
 

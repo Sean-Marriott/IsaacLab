@@ -43,13 +43,19 @@ class LeeVelController(LeeControllerBase):
 
         # Gain ranges
         self.K_vel_range = torch.tensor(self.cfg.K_vel_range, device=device).repeat(num_envs, 1, 1)
+        self.K_vel_int_range = torch.tensor(self.cfg.K_vel_int_range, device=device).repeat(num_envs, 1, 1)
         self.K_rot_range = torch.tensor(self.cfg.K_rot_range, device=device).repeat(num_envs, 1, 1)
         self.K_angvel_range = torch.tensor(self.cfg.K_angvel_range, device=device).repeat(num_envs, 1, 1)
 
         # Current gains
         self.K_vel_current = self.K_vel_range.mean(dim=1)
+        self.K_vel_int_current = self.K_vel_int_range.mean(dim=1)
         self.K_rot_current = self.K_rot_range.mean(dim=1)
         self.K_angvel_current = self.K_angvel_range.mean(dim=1)
+
+        # Integral of the world-frame velocity error, advanced once per control step.
+        self.vel_error_integral = torch.zeros(num_envs, 3, device=device)
+        self._integral_enabled = bool(torch.any(self.K_vel_int_range > 0.0))
 
     def compute(self, command: torch.Tensor) -> torch.Tensor:
         """Compute wrench command from velocity setpoint.
@@ -97,9 +103,21 @@ class LeeVelController(LeeControllerBase):
         return self.wrench_command_b
 
     def _randomize_params(self, env_ids: slice | torch.Tensor):
-        """Randomize controller gains for the given environments if enabled."""
+        """Randomize controller gains and clear the integral state for the given environments.
+
+        The integral must be cleared here rather than allowed to persist: it accumulates against a
+        particular episode's disturbance, and carrying it into the next one would apply a correction
+        for a state that no longer exists.
+        """
+        self.vel_error_integral[env_ids] = 0.0
         self.K_vel_current[env_ids] = math_utils.sample_uniform(
             self.K_vel_range[env_ids, 0], self.K_vel_range[env_ids, 1], self.K_vel_range[env_ids, 0].shape, self.device
+        )
+        self.K_vel_int_current[env_ids] = math_utils.sample_uniform(
+            self.K_vel_int_range[env_ids, 0],
+            self.K_vel_int_range[env_ids, 1],
+            self.K_vel_int_range[env_ids, 0].shape,
+            self.device,
         )
         self.K_rot_current[env_ids] = math_utils.sample_uniform(
             self.K_rot_range[env_ids, 0], self.K_rot_range[env_ids, 1], self.K_rot_range[env_ids, 0].shape, self.device
@@ -121,6 +139,11 @@ class LeeVelController(LeeControllerBase):
         force. Without the clamp a large velocity error commands an arbitrarily large tilt, and the
         only thing bounding it is motor saturation, which is neither smooth nor monotone.
 
+        When :attr:`~LeeVelControllerCfg.K_vel_int_range` is non-zero the velocity error is also
+        integrated, so a steady disturbance is rejected instead of leaving a standing error. The
+        integral runs on the world-frame error and is bounded by
+        :attr:`~LeeVelControllerCfg.max_integral_acc`.
+
         Args:
             setpoint_velocity: (num_envs, 3) desired velocity in body frame.
             root_quat_w: (num_envs, 4) root orientation in the world frame.
@@ -139,6 +162,14 @@ class LeeVelController(LeeControllerBase):
         # Compute velocity error and acceleration command
         velocity_error = setpoint_velocity_w - root_lin_vel_w
         acceleration = self.K_vel_current * velocity_error
+
+        if self._integral_enabled:
+            # Clamp the state itself, not just its contribution, so a bound reached during a
+            # saturated episode does not have to unwind before the term can respond again.
+            self.vel_error_integral += velocity_error * self.dt
+            limit = self.cfg.max_integral_acc / self.K_vel_int_current.clamp(min=1e-6)
+            self.vel_error_integral.clamp_(-limit, limit)
+            acceleration = acceleration + self.K_vel_int_current * self.vel_error_integral
 
         # Limit the lateral acceleration to the maximum commanded tilt
         max_lateral_acc = abs(self.gravity[0, 2].item()) * math.tan(self.cfg.max_inclination_angle_rad)

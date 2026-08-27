@@ -65,10 +65,13 @@ class LeeControllerBase:
             math_utils.quat_apply_inverse(root_quat_exp, body_link_pos_delta),
             math_utils.quat_mul(math_utils.quat_inv(root_quat_exp), body_link_quat_w),
         )
-        # Get gravity from simulation context
+        # Get gravity and the control period from simulation context
         sim = sim_utils.SimulationContext.instance()
         gravity_vec = sim.cfg.gravity
         self.gravity = torch.tensor(gravity_vec, device=device, dtype=torch.float32).expand(num_envs, -1)
+        self.dt = sim.cfg.dt
+        """Interval between successive :meth:`compute` calls [s]. Controllers run once per physics
+        step, so this is the physics timestep."""
 
         # Buffers
         self.wrench_command_b = torch.zeros((num_envs, 6), device=device)  # [fx, fy, fz, tx, ty, tz]
