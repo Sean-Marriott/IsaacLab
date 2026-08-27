@@ -27,6 +27,10 @@ import math
 # Configuration - Actuators.
 ##
 
+# Note: ``tau_dec_range`` here is 10-16x shorter than ``tau_inc_range`` and shorter than the 10 ms
+# physics step every drone_arl task runs at. That asymmetry biases the delivered thrust downwards --
+# see the note on MATRICE_THRUSTER for the mechanism and its consequences for a deployed policy. The
+# values are left as upstream defines them; the Matrice thrusters below do not inherit the problem.
 ARL_ROBOT_1_THRUSTER = ThrusterCfg(
     thrust_range=(0.1, 10.0),
     thrust_const_range=(9.26312e-06, 1.826312e-05),
@@ -95,8 +99,37 @@ ARL_ROBOT_1_CFG = MultirotorCfg(
 MATRICE_THRUSTER = ThrusterCfg(
     thrust_range=(0.5, 55.0),
     thrust_const_range=(2.8e-3, 3.9e-3),
+    # The rise and fall time constants are drawn from the same range, independently per motor, and
+    # they must stay comparable.
+    #
+    # A fall constant much shorter than the rise one makes the motor track thrust decreases faster
+    # than increases, which *rectifies* a fluctuating thrust command downwards. Replaying one
+    # recorded command sequence through both models: the previous (0.005, 0.005) delivered 78.8 % of
+    # the commanded thrust, against 94.8 % for the symmetric pair. Reversing the two constants
+    # instead delivers 114.1 %, and a non-fluctuating command shows no bias under any of them, which
+    # is what identifies rectification as the mechanism.
+    #
+    # It is the differential (attitude) component that does the damage: per-motor command varies by
+    # std/mean = 0.53 about hover while the four-motor total varies by only 0.065. Each motor
+    # rectifies its own swing and the losses add in the sum.
+    #
+    # A policy trims the deficit out with a constant positive climb command. At 78.8 % delivery the
+    # predicted trim is g*(1/0.788 - 1)/K_vel = +0.66 of full scale, and the policy trained against
+    # those values learned +0.67. The trim is a simulation artifact with nothing to cancel on a real
+    # vehicle, so the drone climbs away as soon as the policy is deployed.
+    #
+    # Sampling both constants from one range keeps the asymmetry zero-mean and randomises its sign
+    # per motor, so no fixed trim is learnable. Both bounds also stay at or above the 10 ms physics
+    # step, below which the first-order model is being asked to resolve dynamics faster than it is
+    # integrated. A 21-inch prop is drag-limited on spin-down, so if anything the fall is the slower
+    # of the two -- never an order of magnitude faster.
+    #
+    # A ~5 % deficit survives this fix and is expected: the lag acts on RPM while thrust scales as
+    # rpm^2, so smoothing the RPM lowers the mean thrust whatever the symmetry. That part is real
+    # motor physics rather than a modelling error, and it predicts a residual trim near +0.13 -- the
+    # number a retrained policy should be checked against, rather than zero.
     tau_inc_range=(0.05, 0.08),
-    tau_dec_range=(0.005, 0.005),
+    tau_dec_range=(0.05, 0.08),
     torque_to_thrust_ratio=0.05,
     thruster_names_expr=["back_left_prop", "back_right_prop", "front_left_prop", "front_right_prop"],
 )
