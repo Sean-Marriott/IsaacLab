@@ -10,19 +10,21 @@ The following configuration parameters are available:
 * :obj:`ARL_ROBOT_1_CFG`: The ARL_Robot_1
 """
 
-import math
 import pathlib
 
 import isaaclab.sim as sim_utils
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-_M350_USD_PATH = str(
-    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots" / "M350-chainsaw.usd"
+_M350_ROBOTS_DIR = (
+    pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots"
 )
+
+_M350_USD_PATH = str(_M350_ROBOTS_DIR / "M350-chainsaw.usd")
+_M350_CLEAN_USD_PATH = str(_M350_ROBOTS_DIR / "M350.usd")
 
 from isaaclab_contrib.actuators import ThrusterCfg
 from isaaclab_contrib.assets import MultirotorCfg
-import math
+
 ##
 # Configuration - Actuators.
 ##
@@ -164,6 +166,69 @@ MATRICE_CFG = MultirotorCfg(
         },
     ),
     actuators={"thrusters": MATRICE_THRUSTER},
+    rotor_directions=[-1, 1, -1, 1],
+    allocation_matrix=[
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [-0.3182, -0.3182, 0.3161, 0.3161],
+        [-0.3382, 0.3382, 0.3786, -0.3786],
+        [-0.05, 0.05, -0.05, 0.05],
+    ],
+)
+
+# DJI Matrice 350 RTK without the chainsaw payload.
+# Same airframe as MATRICE_CFG -- identical body names, motor positions, allocation matrix and
+# thruster model -- but spawned from M350.usd, which carries only base_link and the four props.
+#   base_link  5.968 kg, diagonal inertia (0.7, 0.7, 0.9) kg*m^2
+#   props      4 x 0.133 kg, no own inertia (they contribute via the parallel-axis term)
+#   total      6.500 kg   (vs 8.665 kg with the chainsaw, jetson, hinge and tube)
+# Aggregate inertia about the robot COM, as LeeControllerBase computes it from PhysX:
+#   (I_xx, I_yy, I_zz) = (0.7754, 0.7560, 1.0286) kg*m^2   (vs (2.640, 2.649, 1.065) with chainsaw)
+# Hover thrust per motor = 6.500 * 9.81 / 4 = 15.94 N, so with k_f = 3.35e-3 N/rps^2 the hover
+# speed is sqrt(15.94 / 3.35e-3) = 68.98 rps.  Thrust-to-weight = 4 * 55 / (6.500 * 9.81) = 3.45.
+# The lighter airframe has a much smaller attitude inertia than the chainsaw model, so any
+# controller gains tuned for MATRICE_CFG must be re-derived -- see scripts/demos/matrice_vel_demo.py.
+MATRICE_CLEAN_THRUSTER = ThrusterCfg(
+    thrust_range=(0.5, 55.0),
+    thrust_const_range=(2.8e-3, 3.9e-3),
+    # Rise and fall drawn from one range; see the note on MATRICE_THRUSTER.
+    tau_inc_range=(0.05, 0.08),
+    tau_dec_range=(0.05, 0.08),
+    torque_to_thrust_ratio=0.05,
+    thruster_names_expr=["back_left_prop", "back_right_prop", "front_left_prop", "front_right_prop"],
+)
+
+MATRICE_CLEAN_CFG = MultirotorCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=_M350_CLEAN_USD_PATH,
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+    ),
+    init_state=MultirotorCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.0),
+        lin_vel=(0.0, 0.0, 0.0),
+        ang_vel=(0.0, 0.0, 0.0),
+        rot=(0.0, 0.0, 0.0, 1.0),
+        rps={
+            "back_left_prop": 68.98,
+            "back_right_prop": 68.98,
+            "front_left_prop": 68.98,
+            "front_right_prop": 68.98,
+        },
+    ),
+    actuators={"thrusters": MATRICE_CLEAN_THRUSTER},
     rotor_directions=[-1, 1, -1, 1],
     allocation_matrix=[
         [0.0, 0.0, 0.0, 0.0],
