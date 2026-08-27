@@ -88,3 +88,7 @@ node_modules/
 
 # Superpowers (Claude Code plugin artifacts)
 docs/superpowers/
+
+# Locally generated demo/analysis output
+/reward_landscape_explorer.html
+/trajectory_command_math_results.png
