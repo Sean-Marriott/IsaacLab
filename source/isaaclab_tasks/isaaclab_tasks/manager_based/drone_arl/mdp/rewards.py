@@ -15,12 +15,13 @@ from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from .curriculums import get_obstacle_curriculum_term
 
 if TYPE_CHECKING:
-    from isaaclab.assets import RigidObject, Articulation
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
 
 """
 Drone control rewards.
 """
+
 
 def distance_to_goal_l2(
     env: ManagerBasedRLEnv,
@@ -48,11 +49,12 @@ def distance_to_goal_l2(
     asset: RigidObject = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
 
-    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins # type: ignore
-    
+    current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
+
     # compute the error
     position_error = torch.norm(command[:, :3] - current_position, dim=1)
     return position_error
+
 
 def distance_to_goal_tanh(
     env: ManagerBasedRLEnv,
@@ -87,6 +89,7 @@ def distance_to_goal_tanh(
     current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
     position_error = torch.norm(command[:, :3] - current_position, dim=1)
     return 1 - torch.tanh(position_error / std)
+
 
 def distance_to_goal_exp(
     env: ManagerBasedRLEnv,
@@ -313,7 +316,10 @@ def yaw_aligned(
     # return exponential reward (1 when yaw=0, approaching 0 when rotated)
     return torch.exp(-(yaw**2) / std**2)
 
-def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot")) -> torch.Tensor:
+
+def joint_pos_target_l2(
+    env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
     """Penalize joint position deviation from a target value using a circular L2-norm.
 
     Joint positions are read as absolute angles in the USD joint coordinate frame.
@@ -341,7 +347,8 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
 
     return torch.sum(torch.square(math_utils.wrap_to_pi(joint_pos - target)), dim=1)
 
-def upright_while_moving(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot")) -> torch.Tensor:
+
+def upright_while_moving(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
 
     # pole error (squared deviation from upright)
@@ -394,9 +401,7 @@ class PoleEnergy(ManagerTermBase):
         assert isinstance(joint_ids, list) and len(joint_ids) >= 2, (
             "asset_cfg must specify exactly 2 joints by name: [pitch, roll]"
         )
-        assert isinstance(body_ids, list) and len(body_ids) >= 1, (
-            "pole_body_cfg must specify the pole body by name"
-        )
+        assert isinstance(body_ids, list) and len(body_ids) >= 1, "pole_body_cfg must specify the pole body by name"
 
         # Cache integer indices so __call__ avoids re-indexing a list|slice union.
         self._pitch_id: int = joint_ids[0]
@@ -421,7 +426,7 @@ class PoleEnergy(ManagerTermBase):
         # Using spherical pendulum energy model
         # kinetic:   ½ · m · L² · (ω_pitch² + ω_roll²)
         # potential: m · g · L  · (1 − cos √(θ_pitch² + θ_roll²))
-        self._kinetic_coeff = 0.5 * mass * length**2    # (num_envs,)
+        self._kinetic_coeff = 0.5 * mass * length**2  # (num_envs,)
         self._potential_coeff = mass * gravity * length  # (num_envs,)
 
     def __call__(
@@ -434,16 +439,81 @@ class PoleEnergy(ManagerTermBase):
 
         joint_pos = asset.data.joint_pos.torch  # (num_envs, num_joints)
         joint_vel = asset.data.joint_vel.torch  # (num_envs, num_joints)
-        
-        pitch     = joint_pos[:, self._pitch_id]
-        roll      = joint_pos[:, self._roll_id]
-        pitch_vel = joint_vel[:, self._pitch_id]
-        roll_vel  = joint_vel[:, self._roll_id]
 
-        vel_sq  = pitch_vel**2 + roll_vel**2
+        pitch = joint_pos[:, self._pitch_id]
+        roll = joint_pos[:, self._roll_id]
+        pitch_vel = joint_vel[:, self._pitch_id]
+        roll_vel = joint_vel[:, self._roll_id]
+
+        vel_sq = pitch_vel**2 + roll_vel**2
         tilt_sq = pitch**2 + roll**2
 
-        kinetic   = self._kinetic_coeff * vel_sq
+        kinetic = self._kinetic_coeff * vel_sq
         potential = self._potential_coeff * (1.0 - torch.cos(torch.sqrt(tilt_sq + 1e-8)))
 
         return kinetic + potential
+
+
+"""
+Trajectory tracking rewards.
+"""
+
+
+def velocity_tracking_exp(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    std: float = 1.0,
+    command_name: str = "trajectory",
+) -> torch.Tensor:
+    """Reward matching the reference velocity using an exponential kernel.
+
+    Position tracking alone is not enough on a closed reference path: sitting near the centroid and
+    letting the reference orbit around keeps the mean position error small. Rewarding the reference
+    velocity makes that solution strictly worse, so the drone actually flies the path.
+
+    Args:
+        env: The manager-based RL environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+        std: Standard deviation used in the exponential kernel [m/s]; larger values produce a
+            gentler falloff.
+        command_name: Name of the trajectory command to read the reference velocity from. The
+            function expects the reference velocity in columns 3 to 6 of the command tensor.
+
+    Returns:
+        A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates an exact match.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    velocity_error_square = torch.sum(torch.square(command[:, 3:6] - asset.data.root_lin_vel_w.torch), dim=1)
+    return torch.exp(-velocity_error_square / std**2)
+
+
+def yaw_tracking_exp(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    std: float = 0.5,
+    command_name: str = "trajectory",
+) -> torch.Tensor:
+    """Reward alignment of the vehicle yaw with a commanded yaw using an exponential kernel.
+
+    This differs from :func:`yaw_aligned`, which always targets a yaw of zero.
+
+    Args:
+        env: The manager-based RL environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
+        std: Standard deviation used in the exponential kernel [rad]; smaller values make the
+            reward more sensitive to yaw deviations.
+        command_name: Name of the trajectory command to read the reference yaw from. The function
+            expects the reference yaw in column 9 of the command tensor.
+
+    Returns:
+        A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates perfect
+        alignment.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w.torch)
+    yaw_error = math_utils.wrap_to_pi(command[:, 9] - yaw)
+    return torch.exp(-(yaw_error**2) / std**2)

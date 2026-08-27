@@ -6,7 +6,10 @@
 __all__ = [
     "DroneUniformPoseCommandCfg",
     "DroneUniformPoseCommand",
+    "DroneTrajectoryCommandCfg",
+    "DroneTrajectoryCommand",
 ]
 
-from .commands_cfg import DroneUniformPoseCommandCfg
+from .commands_cfg import DroneTrajectoryCommandCfg, DroneUniformPoseCommandCfg
 from .drone_pose_command import DroneUniformPoseCommand
+from .trajectory_command import DroneTrajectoryCommand

@@ -39,6 +39,7 @@ State.
 """
 
 
+@generic_io_descriptor(dtype=torch.float32, observation_type="RootState", on_inspect=[record_shape])
 def base_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Return the base roll and pitch in the simulation world frame.
 
@@ -68,6 +69,8 @@ def base_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntit
 """
 Sensors
 """
+
+
 def lidar_scan(
     env: ManagerBasedEnv,
     sensor_cfg: SceneEntityCfg,
@@ -180,6 +183,7 @@ def lidar_sector_min_distances(
         return sector_mins / max_distance
     return sector_mins
 
+
 class ImageLatentObservation(ManagerTermBase):
     """Callable observation term that returns VAE latents from camera images.
 
@@ -238,8 +242,8 @@ class ImageLatentObservation(ManagerTermBase):
         super().__init__(cfg, env)
         self.camera_sensor: TiledCamera | Camera | RayCasterCamera | MultiMeshRayCasterCamera = env.scene.sensors[
             cfg.params["sensor_cfg"].name
-        ] # type: ignore
-        self.data_type: str = cfg.params["data_type"] # type: ignore
+        ]  # type: ignore
+        self.data_type: str = cfg.params["data_type"]  # type: ignore
         self.convert_perspective_to_orthogonal = bool(cfg.params.get("convert_perspective_to_orthogonal", False))
         self.normalize = bool(cfg.params.get("normalize", True))
 
@@ -390,3 +394,168 @@ def generated_drone_commands(
     current_position_b_mag = torch.linalg.norm(current_position_b, dim=-1, keepdim=True)
     return torch.cat((current_position_b_dir, current_position_b_mag), dim=-1)
 
+
+"""
+Trajectory tracking.
+
+All of these express the reference in the *yaw-only vehicle frame* rather than the full body frame.
+That matches how :class:`~isaaclab_contrib.controllers.LeeVelController` interprets the velocity
+action: it builds its setpoint frame from yaw alone. Using the full body frame would mix roll and
+pitch into the observation-to-action mapping and force the network to undo a rotation it does not
+command. Roll and pitch still reach the policy through :func:`base_roll_pitch` and the body-frame
+linear and angular velocities.
+"""
+
+
+def _vehicle_frame_quat(asset: Multirotor) -> torch.Tensor:
+    """Return the yaw-only orientation of the asset. Shape is (num_envs, 4)."""
+    return math_utils.yaw_quat(asset.data.root_link_quat_w.torch)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_position_error_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Position error to the reference, in the vehicle frame.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference position minus the current position [m], expressed in the yaw-only vehicle
+        frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    error_w = command[:, :3] - (asset.data.root_pos_w.torch - env.scene.env_origins)
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_velocity_error_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Velocity error to the reference, in the vehicle frame.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference velocity minus the current velocity [m/s], expressed in the yaw-only vehicle
+        frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    error_w = command[:, 3:6] - asset.data.root_lin_vel_w.torch
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_velocity_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reference velocity feed-forward, in the vehicle frame.
+
+    The optimal action is roughly ``v_ref + Kp * position_error``, so handing the policy ``v_ref``
+    directly leaves it only the correction to learn.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference velocity [m/s] in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), command[:, 3:6])
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_accel_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reference acceleration feed-forward, in the vehicle frame.
+
+    This is what lets the policy lead the first-order velocity loop instead of lagging it.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference acceleration [m/s^2] in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), command[:, 6:9])
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_yaw_error(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Yaw error to the reference, wrapped to (-pi, pi].
+
+    The Lee velocity controller commands yaw *rate* and never closes a loop on yaw angle, so the
+    policy has to close it and therefore needs this term.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The wrapped yaw error [rad]. Shape is (num_envs, 1).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w.torch)
+    return math_utils.wrap_to_pi(command[:, 9] - yaw).unsqueeze(-1)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_yaw_rate(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Reference yaw rate feed-forward.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+
+    Returns:
+        The reference yaw rate [rad/s]. Shape is (num_envs, 1).
+    """
+    return env.command_manager.get_command(command_name)[:, 10:11]
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_lookahead_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Future reference positions relative to the current one, in the vehicle frame.
+
+    Each look-ahead point is reported as an offset from the *current* position rather than as an
+    absolute one, so the observation stays bounded and centred on zero regardless of where in the
+    environment the drone is.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The look-ahead offsets [m] in the yaw-only vehicle frame, flattened.
+        Shape is (num_envs, 3 * num_lookahead).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    position_w = asset.data.root_pos_w.torch - env.scene.env_origins
+    lookahead_w = command[:, 11:].reshape(env.num_envs, -1, 3) - position_w.unsqueeze(1)
+    vehicle_quat = _vehicle_frame_quat(asset).unsqueeze(1).expand(-1, lookahead_w.shape[1], -1)
+    return math_utils.quat_apply_inverse(vehicle_quat, lookahead_w).flatten(start_dim=1)

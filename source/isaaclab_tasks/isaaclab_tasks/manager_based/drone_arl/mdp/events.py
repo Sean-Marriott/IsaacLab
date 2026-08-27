@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 
 from .curriculums import get_obstacle_curriculum_term
 
@@ -231,9 +231,7 @@ def reset_single_obstacle(
         raise ValueError("radius_min must be less than or equal to radius_max.")
 
     angles = 2.0 * torch.pi * torch.rand(num_envs, device=env.device)
-    radii = torch.sqrt(
-        torch.rand(num_envs, device=env.device) * (radius_max_m**2 - radius_min_m**2) + radius_min_m**2
-    )
+    radii = torch.sqrt(torch.rand(num_envs, device=env.device) * (radius_max_m**2 - radius_min_m**2) + radius_min_m**2)
 
     positions = torch.zeros(num_envs, 3, device=env.device)
     positions[:, 0] = radii * torch.cos(angles)
@@ -250,24 +248,21 @@ def reset_single_obstacle(
     # Get vector from origin to obstacle (in env-local frame, XY plane)
     # positions already includes env_origins, so subtract to get the local direction
     obstacle_local_xy = positions[:, 0:2] - env_origins[:, 0:2]  # (num_envs, 2)
-    
+
     # Sample how far past the obstacle to place the drone
-    drone_offsets = (
-        torch.rand(num_envs, device=env.device) * (drone_offset_max - drone_offset_min)
-        + drone_offset_min
-    )
-    
+    drone_offsets = torch.rand(num_envs, device=env.device) * (drone_offset_max - drone_offset_min) + drone_offset_min
+
     # Normalize — radii is guaranteed > 0 if radius_min > 0; guard anyway
     directions = obstacle_local_xy / radii.unsqueeze(-1).clamp(min=1e-6)
-    
+
     # Robot
     robot: RigidObject | Articulation = env.scene[robot_cfg.name]
-    
+
     # poses
     range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
     ranges = torch.tensor(range_list, device=robot.device)
     rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=robot.device)
-    
+
     # Place drone on the vector from origin past the obstacle
     drone_distance = radii + drone_offsets  # (num_envs,)
     drone_positions = torch.zeros(num_envs, 3, device=env.device)
@@ -275,18 +270,181 @@ def reset_single_obstacle(
     drone_positions[:, 1] = drone_distance * directions[:, 1]
     drone_positions[:, 2] = rand_samples[:, 2]
     drone_positions += env_origins
-    
+
     orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
     drone_quat = torch.zeros(num_envs, 4, device=env.device)
     drone_quat[:, 3] = 1
     drone_quat = math_utils.quat_mul(drone_quat, orientations_delta)
     drone_pose = torch.cat([drone_positions, drone_quat], dim=-1)
-    
+
     # velocities
     range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
     ranges = torch.tensor(range_list, device=robot.device)
     rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=robot.device)
-    
+
     drone_velocity = torch.zeros(num_envs, 6, device=env.device) + rand_samples
     robot.write_root_pose_to_sim(drone_pose, env_ids=env_ids)
     robot.write_root_velocity_to_sim(drone_velocity, env_ids=env_ids)
+
+
+def reset_root_state_on_trajectory(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    command_name: str = "trajectory",
+    pos_noise: tuple[float, float] = (-0.25, 0.25),
+    vel_noise: tuple[float, float] = (-0.2, 0.2),
+    yaw_noise: tuple[float, float] = (-0.3, 0.3),
+    rp_noise: tuple[float, float] = (-0.1, 0.1),
+    angvel_noise: tuple[float, float] = (-0.2, 0.2),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Reset the drone onto the start of a freshly sampled reference trajectory.
+
+    Reset events run *before* the command manager resamples, so the trajectory the drone should be
+    spawned on does not exist yet at this point. This function therefore drives the sampling itself:
+    it asks the trajectory command term for a new trajectory, evaluates it at ``t = 0``, writes the
+    robot state around that reference, and flags the term so it keeps the trajectory instead of
+    immediately drawing another one.
+
+    Noise on the yaw is applied *relative to the reference yaw* rather than uniformly. With a
+    per-episode random reference yaw the absolute heading distribution is uniform either way, but
+    keeping the initial yaw *error* small means an episode starts as a tracking problem rather than
+    as a yaw recovery problem.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to reset.
+        command_name: Name of the trajectory command term to sample and read the reference from.
+        pos_noise: Range of the per-axis position offset from the reference [m].
+        vel_noise: Range of the per-axis velocity offset from the reference [m/s].
+        yaw_noise: Range of the yaw offset from the reference yaw [rad].
+        rp_noise: Range of the initial roll and pitch [rad].
+        angvel_noise: Range of the initial angular velocity about each axis [rad/s].
+        asset_cfg: SceneEntityCfg identifying the asset to reset.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_term = env.command_manager.get_term(command_name)
+
+    # Draw the trajectory now so the spawn state can be matched to it, and tell the command term
+    # not to redraw it when it resamples a moment later.
+    command_term.sample_parameters(env_ids)
+    command_term.evaluate_at(env_ids, torch.zeros(len(env_ids), device=asset.device))
+    command_term._sampled_by_event[env_ids] = True
+
+    def _sample(noise_range: tuple[float, float], size: tuple[int, ...]) -> torch.Tensor:
+        return math_utils.sample_uniform(noise_range[0], noise_range[1], size, device=asset.device)
+
+    num_resets = len(env_ids)
+    positions = command_term.pos_ref_w[env_ids] + env.scene.env_origins[env_ids] + _sample(pos_noise, (num_resets, 3))
+    roll = _sample(rp_noise, (num_resets,))
+    pitch = _sample(rp_noise, (num_resets,))
+    yaw = command_term.yaw_ref[env_ids] + _sample(yaw_noise, (num_resets,))
+    orientations = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+
+    velocities = torch.cat(
+        [
+            command_term.vel_ref_w[env_ids] + _sample(vel_noise, (num_resets, 3)),
+            _sample(angvel_noise, (num_resets, 3)),
+        ],
+        dim=-1,
+    )
+
+    asset.write_root_pose_to_sim_index(root_pose=torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    asset.write_root_velocity_to_sim_index(root_velocity=velocities, env_ids=env_ids)
+
+
+class WindAndDrag(ManagerTermBase):
+    """Apply a sustained wind gust and aerodynamic drag as a single combined wrench.
+
+    Wind and drag are deliberately handled by one term rather than two. Both act on the same
+    persistent external-wrench buffer, so two independent terms would simply overwrite each other
+    and only whichever ran last would take effect.
+
+    Drag matters here because the simulated airframe has ``linear_damping = 0.0`` and therefore no
+    aerodynamic resistance at all. A policy trained without it learns to command velocities that are
+    systematically too high for a real vehicle, and the underlying Lee controller has no integral
+    term to absorb the difference. The drag model is the usual quadratic one,
+    ``F = -0.5 * rho * Cd * A * |v| * v``, with the drag area sampled per environment at reset so
+    the policy has to be robust to it rather than learning one exact value.
+
+    This term is intended to run every policy step with ``is_global_time=True``, so the drag force
+    tracks the current velocity. The gust is resampled on its own slower timer and held in between,
+    which models sustained wind rather than an impulse.
+
+    Args:
+        cfg: Event term configuration.
+        env: The manager-based RL environment instance.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+
+        asset_cfg: SceneEntityCfg = cfg.params.get("asset_cfg", SceneEntityCfg("robot"))
+        asset_cfg.resolve(env.scene)
+        self._asset_cfg = asset_cfg
+        asset: Articulation = env.scene[asset_cfg.name]
+
+        num_envs, device = env.num_envs, asset.device
+        self._gust_force = torch.zeros(num_envs, 3, device=device)
+        self._gust_torque = torch.zeros(num_envs, 3, device=device)
+        self._gust_time_left = torch.zeros(num_envs, device=device)
+        self._drag_area = torch.zeros(num_envs, device=device)
+        self._all_env_ids = torch.arange(num_envs, device=device, dtype=torch.int32)
+
+    def reset(self, env_ids: torch.Tensor | None = None):
+        """Resample the per-environment drag area and force an immediate gust resample."""
+        if env_ids is None:
+            env_ids = slice(None)
+        drag_area_range = self.cfg.params.get("drag_area_range", (0.10, 0.30))
+        shape = self._drag_area[env_ids].shape
+        self._drag_area[env_ids] = math_utils.sample_uniform(*drag_area_range, shape, self._drag_area.device)
+        self._gust_time_left[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: torch.Tensor | None,
+        force_range: tuple[float, float] = (-6.0, 6.0),
+        torque_range: tuple[float, float] = (-0.4, 0.4),
+        gust_interval_range_s: tuple[float, float] = (2.0, 6.0),
+        drag_area_range: tuple[float, float] = (0.10, 0.30),
+        air_density: float = 1.225,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ) -> None:
+        """Write the combined gust and drag wrench for every environment.
+
+        Args:
+            env: The manager-based RL environment instance.
+            env_ids: Unused. The term always writes every environment so the drag stays current.
+            force_range: Range of each gust force component [N].
+            torque_range: Range of each gust torque component [N*m].
+            gust_interval_range_s: Range of the interval between gust resamples [s].
+            drag_area_range: Range of the effective drag area ``Cd * A`` [m^2], sampled per
+                environment at reset.
+            air_density: Air density [kg/m^3].
+            asset_cfg: SceneEntityCfg identifying the asset and the body the wrench acts on.
+        """
+        asset: Articulation = env.scene[asset_cfg.name]
+        device = asset.device
+
+        # -- gust: resample only the environments whose hold has expired, keep the rest
+        self._gust_time_left -= env.step_dt
+        expired = (self._gust_time_left <= 0.0).nonzero().flatten()
+        if len(expired) > 0:
+            self._gust_force[expired] = math_utils.sample_uniform(*force_range, (len(expired), 3), device)
+            self._gust_torque[expired] = math_utils.sample_uniform(*torque_range, (len(expired), 3), device)
+            self._gust_time_left[expired] = math_utils.sample_uniform(*gust_interval_range_s, (len(expired),), device)
+
+        # -- drag: opposes the current world-frame velocity, quadratic in speed
+        velocity = asset.data.root_lin_vel_w.torch
+        speed = torch.linalg.norm(velocity, dim=-1, keepdim=True)
+        drag = -0.5 * air_density * self._drag_area.unsqueeze(-1) * speed * velocity
+
+        forces = (self._gust_force + drag).unsqueeze(1)
+        torques = self._gust_torque.unsqueeze(1)
+        asset.permanent_wrench_composer.set_forces_and_torques_index(
+            forces=forces,
+            torques=torques,
+            body_ids=asset_cfg.body_ids,
+            env_ids=self._all_env_ids,
+        )
