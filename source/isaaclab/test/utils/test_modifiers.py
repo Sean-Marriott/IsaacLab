@@ -225,6 +225,7 @@ def test_integral(device):
         # check if the modified data is close to the expected result
         torch.testing.assert_close(processed_data, test_cfg.result)
 
+
 def _counter_batch(t: int, shape, device):
     return torch.full(shape, float(t), device=device)
 
@@ -275,9 +276,7 @@ def test_delayed_observation_multi_rate_period_3(device):
     # compute expected final value: last t minus realized lag under the 3-step cadence
     realized = None
     for t in range(num_iter):
-        if realized is None:
-            realized = 3
-        elif ((t + 1) % cfg.update_period) == 0:  # refresh on every 3rd call
+        if realized is None or ((t + 1) % cfg.update_period) == 0:
             realized = 3
         else:
             realized = min(realized + 1, cfg.max_lag)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.utils.buffers import DelayBuffer
+
 from .modifier_base import ModifierBase
 
 if TYPE_CHECKING:
@@ -259,6 +260,7 @@ class Integrator(ModifierBase):
         self.y_prev[:] = data
 
         return self.integral
+
 
 class DelayedObservation(ModifierBase):
     r"""A modifier used to return a stochastically delayed (stale) version of

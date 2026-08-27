@@ -21,6 +21,30 @@ from isaaclab.utils.buffers import CircularBuffer
 from .manager_base import ManagerBase, ManagerTermBase
 from .manager_term_cfg import ObservationGroupCfg, ObservationTermCfg
 
+
+def _describe_modifier(modifier) -> dict[str, object]:
+    """Reduce a modifier configuration to a YAML-serializable description.
+
+    Args:
+        modifier: A modifier configuration object, or anything else.
+
+    Returns:
+        A dictionary of the modifier's class name and its scalar configuration fields. Fields that
+        are not simple scalars, such as the modifier's own callable, are omitted.
+    """
+    if not hasattr(modifier, "__dict__"):
+        return {"type": str(modifier)}
+    described: dict[str, object] = {"type": type(modifier).__name__}
+    for key, value in modifier.__dict__.items():
+        if key == "func":
+            continue
+        if isinstance(value, (bool, int, float, str)) or value is None:
+            described[key] = value
+        elif isinstance(value, (list, tuple)):
+            described[key] = list(value)
+    return described
+
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -284,6 +308,11 @@ class ObservationManager(ManagerBase):
                     # Check if v is a tensor and convert to list
                     if isinstance(v, torch.Tensor):
                         v = v.detach().cpu().numpy().tolist()
+                    # Modifier configurations are arbitrary objects that a YAML safe-dumper cannot
+                    # represent, which would otherwise fail the export of the whole environment.
+                    # Reduce them to their class name and configured fields.
+                    if k == "modifiers" and v is not None:
+                        v = [_describe_modifier(modifier) for modifier in v]
                     if k in ["scale", "clip", "history_length", "flatten_history_dim"]:
                         formatted_item["overloads"][k] = v
                     elif k in ["modifiers", "description", "units"]:
@@ -616,11 +645,13 @@ class ObservationManager(ManagerBase):
                         term_params = list(mod_cfg.params.keys())
                         args = inspect.signature(mod_cfg.func).parameters
                         args_with_defaults = [
-                            arg for arg in args
+                            arg
+                            for arg in args
                             if args[arg].default is not inspect.Parameter.empty and args[arg].kind not in _var_kinds
                         ]
                         args_without_defaults = [
-                            arg for arg in args
+                            arg
+                            for arg in args
                             if args[arg].default is inspect.Parameter.empty and args[arg].kind not in _var_kinds
                         ]
                         args = args_without_defaults + args_with_defaults

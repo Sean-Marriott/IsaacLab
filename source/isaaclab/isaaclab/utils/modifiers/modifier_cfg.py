@@ -78,12 +78,14 @@ class IntegratorCfg(ModifierCfg):
     dt: float = MISSING
     """The time step of the integrator."""
 
+
 @configclass
 class DelayedObservationCfg(ModifierCfg):
     """Configuration parameters for a delayed observation modifier.
-    
+
     For more information, please check the :class:`DelayedObservation` class.
     """
+
     func: type[modifier.DelayedObservation] = modifier.DelayedObservation
     """The delayed observation function to be called for applying the delay."""
 
