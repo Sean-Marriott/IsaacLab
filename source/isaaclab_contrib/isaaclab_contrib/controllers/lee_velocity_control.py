@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -115,11 +116,18 @@ class LeeVelController(LeeControllerBase):
     ) -> torch.Tensor:
         """Compute desired acceleration from velocity tracking error.
 
+        The lateral acceleration is clamped to what :attr:`~LeeControllerBaseCfg.max_inclination_angle_rad`
+        allows, since the desired attitude is derived directly from the direction of the commanded
+        force. Without the clamp a large velocity error commands an arbitrarily large tilt, and the
+        only thing bounding it is motor saturation, which is neither smooth nor monotone.
+
         Args:
             setpoint_velocity: (num_envs, 3) desired velocity in body frame.
+            root_quat_w: (num_envs, 4) root orientation in the world frame.
+            root_lin_vel_w: (num_envs, 3) root linear velocity in the world frame [m/s].
 
         Returns:
-            (num_envs, 3) desired acceleration in body frame.
+            (num_envs, 3) desired acceleration in body frame [m/s^2].
         """
         # Get yaw-only orientation (vehicle frame)
         _, _, yaw = math_utils.euler_xyz_from_quat(root_quat_w)
@@ -130,4 +138,10 @@ class LeeVelController(LeeControllerBase):
 
         # Compute velocity error and acceleration command
         velocity_error = setpoint_velocity_w - root_lin_vel_w
-        return self.K_vel_current * velocity_error
+        acceleration = self.K_vel_current * velocity_error
+
+        # Limit the lateral acceleration to the maximum commanded tilt
+        max_lateral_acc = abs(self.gravity[0, 2].item()) * math.tan(self.cfg.max_inclination_angle_rad)
+        lateral_acc_norm = torch.linalg.norm(acceleration[:, :2], dim=1, keepdim=True)
+        acceleration[:, :2] *= torch.clamp(max_lateral_acc / (lateral_acc_norm + 1e-6), max=1.0)
+        return acceleration
