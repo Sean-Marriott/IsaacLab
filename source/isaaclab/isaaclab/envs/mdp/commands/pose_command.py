@@ -127,9 +127,7 @@ class UniformPoseCommand(CommandTerm):
                 env_ids = slice(None)
             # Write the unified ``Metrics/success_rate`` directly to env extras so it shares
             # a TensorBoard card with the same metric from other tasks.
-            self._env.extras.setdefault("log", {})["Metrics/success_rate"] = (
-                self._succeeded[env_ids].float().mean()
-            )
+            self._env.extras.setdefault("log", {})["Metrics/success_rate"] = self._succeeded[env_ids].float().mean()
             self._succeeded[env_ids] = False
         return extras
 

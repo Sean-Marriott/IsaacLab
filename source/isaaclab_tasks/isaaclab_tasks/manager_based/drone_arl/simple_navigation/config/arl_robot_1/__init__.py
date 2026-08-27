@@ -19,7 +19,7 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.env_cfg:LidarNavigationEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LidarNavigationEnvPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        
+
     },
 )
 
@@ -42,7 +42,7 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.env_cfg:LatentDepthNavigationEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LidarNavigationEnvPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        
+
     },
 )
 

@@ -57,12 +57,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from rsl_rl.runners import OnPolicyRunner
 from packaging import version
+from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.string import list_intersection
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
@@ -77,7 +76,9 @@ parser = argparse.ArgumentParser(description="Compare swing suppression policy v
 parser.add_argument("--task", type=str, required=True, help="Gym task ID (use the Play variant for smaller num_envs).")
 parser.add_argument("--num_envs", type=int, default=50, help="Number of parallel environments.")
 parser.add_argument("--num_steps", type=int, default=200, help="Policy steps per rollout (200 steps = 20 s at 10 Hz).")
-parser.add_argument("--output", type=str, default=None, help="Output PNG path. Defaults to <log_dir>/swing_comparison.png.")
+parser.add_argument(
+    "--output", type=str, default=None, help="Output PNG path. Defaults to <log_dir>/swing_comparison.png."
+)
 cli_args.add_rsl_rl_args(parser)
 add_launcher_args(parser)
 args_cli, remaining_args = parser.parse_known_args()
@@ -127,8 +128,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             roll_idx = joint_names.index("csTubeRoll")
         except ValueError as e:
             raise RuntimeError(
-                f"Could not find chainsaw joints in {joint_names}. "
-                "Check joint names match csTubePitch / csTubeRoll."
+                f"Could not find chainsaw joints in {joint_names}. Check joint names match csTubePitch / csTubeRoll."
             ) from e
 
         num_steps = args_cli.num_steps

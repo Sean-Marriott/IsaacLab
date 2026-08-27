@@ -18,34 +18,32 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg, MultiMeshRayCasterCfg, patterns
 from isaaclab.utils import configclass
-from isaaclab.sensors import ContactSensorCfg, patterns, MultiMeshRayCasterCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
-from isaaclab_tasks.manager_based.drone_arl.mdp.events import reset_single_obstacle
-from isaaclab_tasks.manager_based.drone_arl.mdp.observations import lidar_sector_min_distances
 
 from isaaclab_contrib.assets import MultirotorCfg
 from isaaclab_contrib.controllers import LeeVelControllerCfg
-import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
 
+import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
 from isaaclab_tasks.manager_based.drone_arl.mdp.commands import DroneUniformPoseCommandCfg
+from isaaclab_tasks.manager_based.drone_arl.mdp.events import reset_single_obstacle
+from isaaclab_tasks.manager_based.drone_arl.mdp.observations import lidar_sector_min_distances
 from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
     ang_vel_xyz_exp,
     distance_to_goal_exp,
+    distance_to_goal_l2,
+    distance_to_goal_tanh,
     lin_vel_xyz_exp,
     yaw_aligned,
-    distance_to_goal_tanh,
-    distance_to_goal_l2
 )
 
 ##
 # Pre-defined configs
 ##
-from .scenes.obstacle_scenes.obstacle_scene import (
-    generate_obstacle_around_origin,
-    OBSTACLE_SCENE_CFG
-)
+from .scenes.obstacle_scenes.obstacle_scene import OBSTACLE_SCENE_CFG, generate_obstacle_around_origin
+
 
 ##
 # Scene definition
@@ -53,7 +51,7 @@ from .scenes.obstacle_scenes.obstacle_scene import (
 @configclass
 class ArlSimpleLidarNavigationSceneCfg(InteractiveSceneCfg):
     """Scene configuration for drone navigation with simple obstacles."""
-    
+
     # obstacles
     object_collection = generate_obstacle_around_origin()
 
@@ -66,7 +64,7 @@ class ArlSimpleLidarNavigationSceneCfg(InteractiveSceneCfg):
         history_length=10,
         debug_vis=True,
     )
-    
+
     ray_caster_cfg = MultiMeshRayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         update_period=1 / 60,
@@ -78,9 +76,9 @@ class ArlSimpleLidarNavigationSceneCfg(InteractiveSceneCfg):
         pattern_cfg=patterns.LidarPatternCfg(
             channels=25, vertical_fov_range=(-90, 90), horizontal_fov_range=(-180, 180), horizontal_res=1.0
         ),
-        debug_vis=True
+        debug_vis=True,
     )
-    
+
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -133,8 +131,8 @@ class ActionsCfg:
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_velocity=0.5,       # 0.5 m/s
-        max_yaw_rate=0.7853982, # 45 degrees/s
+        max_velocity=0.5,  # 0.5 m/s
+        max_yaw_rate=0.7853982,  # 45 degrees/s
     )
 
 
@@ -155,7 +153,7 @@ class ObservationsCfg:
             func=lidar_sector_min_distances,
             params={"sensor_cfg": SceneEntityCfg("ray_caster_cfg"), "num_sectors": 8, "normalize": True},
         )
-        
+
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
@@ -209,7 +207,7 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
-    
+
     distance_to_goal_l2 = RewTerm(
         func=distance_to_goal_l2,
         weight=-5.0,  # negative weight — penalise distance
@@ -226,9 +224,9 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot"),
             "std": 1.5,
             "command_name": "target_pose",
-        }
+        },
     )
-    
+
     distance_to_goal_tanh = RewTerm(
         func=distance_to_goal_tanh,
         weight=10.0,
@@ -244,13 +242,13 @@ class RewardsCfg:
         weight=2.0,
         params={"asset_cfg": SceneEntityCfg("robot"), "std": 1.0},
     )
-    
+
     flat_orientation_l2 = RewTerm(
         func=mdp.flat_orientation_l2,
         weight=1.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    
+
     lin_vel_xyz_exp = RewTerm(
         func=lin_vel_xyz_exp,
         weight=2.5,
@@ -263,11 +261,12 @@ class RewardsCfg:
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
     action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
-    
+
     termination_penalty = RewTerm(
         func=mdp.is_terminated,
         weight=-500.0,
     )
+
 
 @configclass
 class TerminationsCfg:
@@ -282,6 +281,7 @@ class TerminationsCfg:
         time_out=False,
     )
 
+
 ##
 # Environment configuration
 ##
@@ -292,9 +292,7 @@ class SimpleLidarNavigationEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the simple lidar drone navigation environment."""
 
     # Scene settings
-    scene: ArlSimpleLidarNavigationSceneCfg = ArlSimpleLidarNavigationSceneCfg(
-        num_envs=4096, env_spacing=10.0
-    )
+    scene: ArlSimpleLidarNavigationSceneCfg = ArlSimpleLidarNavigationSceneCfg(num_envs=4096, env_spacing=10.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

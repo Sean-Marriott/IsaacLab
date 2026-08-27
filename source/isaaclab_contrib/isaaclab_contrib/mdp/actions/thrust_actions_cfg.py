@@ -206,6 +206,7 @@ class NavigationActionCfg(ThrustActionCfg):
     max_inclination_angle: float = MISSING
     """Maximum inclination angle [rad] for position, velocity and acceleration lee geometric controller."""
 
+
 @configclass
 class DirectVelocityActionCfg(ThrustActionCfg):
     """Configuration for the direct velocity action term.

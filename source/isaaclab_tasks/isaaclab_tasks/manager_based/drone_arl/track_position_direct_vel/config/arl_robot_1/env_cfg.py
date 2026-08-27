@@ -3,11 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
-
-import isaaclab.envs.mdp as mdp
 
 from isaaclab_assets.robots.arl_robot_1 import ARL_ROBOT_1_CFG, MATRICE_CFG
 
@@ -53,9 +49,10 @@ class MatriceDirectVelEnvCfg(TrackPositionDirectVelEnvCfg):
         #   K_vel    = sqrt(K_rot / I_att)                     (1:1 cascade bandwidth ratio)
         #   Yaw: K_rot_z = 0.4 × K_rot_xy, K_angvel_z from same ζ formula with I_zz
         ctrl = self.actions.velocity_command.controller_cfg
-        ctrl.K_rot_range    = ((29.1, 29.1, 11.6), (35.6, 35.6, 14.2))
-        ctrl.K_angvel_range = ((14.2, 14.2,  5.7), (17.3, 17.3,  6.9))
-        ctrl.K_vel_range    = (( 3.1,  3.1,  1.9), ( 3.8,  3.8,  2.3))
+        ctrl.K_rot_range = ((29.1, 29.1, 11.6), (35.6, 35.6, 14.2))
+        ctrl.K_angvel_range = ((14.2, 14.2, 5.7), (17.3, 17.3, 6.9))
+        ctrl.K_vel_range = ((3.1, 3.1, 1.9), (3.8, 3.8, 2.3))
+
 
 @configclass
 class MatriceDirectVelEnvCfg_PLAY(MatriceDirectVelEnvCfg):

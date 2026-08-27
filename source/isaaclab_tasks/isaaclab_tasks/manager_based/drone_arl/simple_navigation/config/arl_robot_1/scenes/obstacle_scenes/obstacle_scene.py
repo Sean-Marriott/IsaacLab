@@ -76,9 +76,7 @@ def generate_obstacle_collection(cfg: ObstaclesSceneCfg) -> RigidObjectCollectio
                 mass_props=sim_utils.MassPropertiesCfg(mass=10000000.0),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(default_center[0], default_center[1], default_center[2])
-            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(default_center[0], default_center[1], default_center[2])),
             collision_group=0,
         )
 
@@ -109,29 +107,32 @@ def generate_obstacle_collection(cfg: ObstaclesSceneCfg) -> RigidObjectCollectio
                 mass_props=sim_utils.MassPropertiesCfg(mass=100.0),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(default_center[0], default_center[1], default_center[2])
-            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(default_center[0], default_center[1], default_center[2])),
             collision_group=0,
         )
 
     return RigidObjectCollectionCfg(rigid_objects=rigid_objects)
 
+
 def generate_obstacle_around_origin():
-    rod_obs_cfg = ObstaclesSceneCfg.BoxCfg(size=(0.1, 0.1, 2.0), center_ratio_min=(0.3, 0.05, 0.05), center_ratio_max=(0.85, 0.9, 0.9))
-    
+    rod_obs_cfg = ObstaclesSceneCfg.BoxCfg(
+        size=(0.1, 0.1, 2.0), center_ratio_min=(0.3, 0.05, 0.05), center_ratio_max=(0.85, 0.9, 0.9)
+    )
+
     rigid_objects = {}
-    
+
     default_center = [0.0, 0.0, 0.0]
 
     color = np.random.randint(0, 256, size=3, dtype=np.uint8)
     color_normalized = tuple(float(c) / 255.0 for c in color)
-    
+
     rigid_objects["rod"] = RigidObjectCfg(
-        prim_path=f"{{ENV_REGEX_NS}}/rod",
+        prim_path="{ENV_REGEX_NS}/rod",
         spawn=sim_utils.CuboidCfg(
             size=rod_obs_cfg.size,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(color_normalized[0], color_normalized[1], color_normalized[2]), metallic=0.2),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(color_normalized[0], color_normalized[1], color_normalized[2]), metallic=0.2
+            ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=0,
@@ -142,13 +143,11 @@ def generate_obstacle_around_origin():
                 max_linear_velocity=0.0,
                 max_angular_velocity=0.0,
             ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=100.0),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(default_center[0], default_center[1], default_center[2])
-            ),
-            collision_group=0,
+            mass_props=sim_utils.MassPropertiesCfg(mass=100.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(default_center[0], default_center[1], default_center[2])),
+        collision_group=0,
     )
 
     return RigidObjectCollectionCfg(rigid_objects=rigid_objects)

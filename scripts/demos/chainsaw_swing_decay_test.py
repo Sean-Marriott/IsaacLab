@@ -54,6 +54,7 @@ import copy
 import math
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
@@ -77,46 +78,47 @@ from isaaclab.sim import SimulationContext
 from isaaclab_contrib.assets import Multirotor
 from isaaclab_contrib.controllers.lee_velocity_control import LeeVelController
 from isaaclab_contrib.controllers.lee_velocity_control_cfg import LeeVelControllerCfg
+
 from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-_INIT_HEIGHT  = 10.0   # m  — initial hover height
-_KICK_ANGLE   = 5.0   # deg — initial csTubePitch displacement
-_DT           = 0.01   # s  — simulation timestep
-_DUR_A        = 60.0   # s  — Exp A (locked root): long enough to see slow numerical decay
-_DUR_B        = 20.0   # s  — Exp B (hover ctrl): controller damps quickly
-_STEPS_A      = int(_DUR_A / _DT)
-_STEPS_B      = int(_DUR_B / _DT)
+_INIT_HEIGHT = 10.0  # m  — initial hover height
+_KICK_ANGLE = 5.0  # deg — initial csTubePitch displacement
+_DT = 0.01  # s  — simulation timestep
+_DUR_A = 60.0  # s  — Exp A (locked root): long enough to see slow numerical decay
+_DUR_B = 20.0  # s  — Exp B (hover ctrl): controller damps quickly
+_STEPS_A = int(_DUR_A / _DT)
+_STEPS_B = int(_DUR_B / _DT)
 
 
 def _compute_lee_gains(controller: LeeVelController, robot_cfg, device: str) -> None:
     """Set Lee controller gains analytically from actual PhysX inertia."""
-    m       = controller.mass[0].item()
-    I_xx    = controller.robot_inertia[0, 0, 0].item()
-    I_yy    = controller.robot_inertia[0, 1, 1].item()
-    I_zz    = controller.robot_inertia[0, 2, 2].item()
-    I_att   = max(I_xx, I_yy)
+    m = controller.mass[0].item()
+    I_xx = controller.robot_inertia[0, 0, 0].item()
+    I_yy = controller.robot_inertia[0, 1, 1].item()
+    I_zz = controller.robot_inertia[0, 2, 2].item()
+    I_att = max(I_xx, I_yy)
 
-    thrust_max   = robot_cfg.actuators["thrusters"].thrust_range[1]
+    thrust_max = robot_cfg.actuators["thrusters"].thrust_range[1]
     hover_thrust = m * 9.81 / 4.0
-    arm_pitch    = sum(abs(v) for v in robot_cfg.allocation_matrix[3])
-    arm_roll     = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
-    tau_max      = (thrust_max - hover_thrust) * min(arm_pitch, arm_roll)
+    arm_pitch = sum(abs(v) for v in robot_cfg.allocation_matrix[3])
+    arm_roll = sum(abs(v) for v in robot_cfg.allocation_matrix[4])
+    tau_max = (thrust_max - hover_thrust) * min(arm_pitch, arm_roll)
 
-    K_rot    = min(tau_max / (0.5 * I_att), 200.0)
-    omega_n  = (K_rot / I_att) ** 0.5
+    K_rot = min(tau_max / (0.5 * I_att), 200.0)
+    omega_n = (K_rot / I_att) ** 0.5
     K_angvel = 2.0 * 0.85 * omega_n * I_att
-    K_rot_z  = 0.4 * K_rot
+    K_rot_z = 0.4 * K_rot
     omega_nz = (K_rot_z / I_zz) ** 0.5
     K_angvelz = 2.0 * 0.85 * omega_nz * I_zz
-    K_vel    = omega_n
+    K_vel = omega_n
 
     print(f"  mass={m:.3f} kg  I_att={I_att:.4f} kg·m²  tau_max={tau_max:.2f} N·m")
     print(f"  K_rot={K_rot:.2f}  K_angvel={K_angvel:.2f}  K_vel={K_vel:.2f}")
 
-    controller.K_rot_current[:]    = torch.tensor([[K_rot,   K_rot,   K_rot_z]],  device=device)
+    controller.K_rot_current[:] = torch.tensor([[K_rot, K_rot, K_rot_z]], device=device)
     controller.K_angvel_current[:] = torch.tensor([[K_angvel, K_angvel, K_angvelz]], device=device)
-    controller.K_vel_current[:]    = torch.tensor([[K_vel, K_vel, K_vel * 0.6]], device=device)
+    controller.K_vel_current[:] = torch.tensor([[K_vel, K_vel, K_vel * 0.6]], device=device)
 
 
 def _reset_robot(robot: Multirotor, pitch_ids: list[int], device: str) -> None:
@@ -128,7 +130,7 @@ def _reset_robot(robot: Multirotor, pitch_ids: list[int], device: str) -> None:
     """
     # Root: (0, 0, _INIT_HEIGHT), identity quaternion, zero velocity.
     init_pose = torch.tensor([[0.0, 0.0, _INIT_HEIGHT, 0.0, 0.0, 0.0, 1.0]], device=device)
-    init_vel  = torch.zeros((1, 6), device=device)
+    init_vel = torch.zeros((1, 6), device=device)
     robot.write_root_pose_to_sim_index(root_pose=init_pose, env_ids=None)
     robot.write_root_velocity_to_sim_index(root_velocity=init_vel, env_ids=None)
 
@@ -161,7 +163,7 @@ def main():
 
     # Joint indices for the two chainsaw DOFs.
     pitch_ids, pitch_names = robot.find_joints(["csTubePitch"])
-    roll_ids,  roll_names  = robot.find_joints(["csTubeRoll"])
+    roll_ids, roll_names = robot.find_joints(["csTubeRoll"])
     print(f"[INFO] csTubePitch joint index: {pitch_ids} ({pitch_names})")
     print(f"[INFO] csTubeRoll  joint index: {roll_ids} ({roll_names})")
 
@@ -177,20 +179,20 @@ def main():
     print("\nLee controller gains:")
     _compute_lee_gains(controller, robot_cfg, device)
 
-    alloc     = torch.tensor(robot_cfg.allocation_matrix, device=device, dtype=torch.float32)
+    alloc = torch.tensor(robot_cfg.allocation_matrix, device=device, dtype=torch.float32)
     alloc_pinv = torch.linalg.pinv(alloc)
-    hover_cmd  = torch.zeros((1, 4), device=device)
+    hover_cmd = torch.zeros((1, 4), device=device)
 
     time_axis_a: list[float] = []
     time_axis_b: list[float] = []
-    pitch_locked: list[float] = []   # Experiment A
-    pitch_hover:  list[float] = []   # Experiment B
+    pitch_locked: list[float] = []  # Experiment A
+    pitch_hover: list[float] = []  # Experiment B
     locked_root_pose = torch.tensor([[0.0, 0.0, _INIT_HEIGHT, 0.0, 0.0, 0.0, 1.0]], device=device)
-    locked_root_vel  = torch.zeros((1, 6), device=device)
+    locked_root_vel = torch.zeros((1, 6), device=device)
 
     # ── Experiment A: locked root ─────────────────────────────────────────────
     print(f"\n{'=' * 55}")
-    print(f"Experiment A: root LOCKED, no controller")
+    print("Experiment A: root LOCKED, no controller")
     print(f"  csTubePitch initial = {_KICK_ANGLE:.0f}°, duration = {_DUR_A:.0f} s")
     print(f"{'=' * 55}")
 
@@ -217,11 +219,11 @@ def main():
         time_axis_a.append(step * _DT)
 
         if step % 500 == 0:
-            print(f"  t={step*_DT:5.1f}s  csTubePitch={pos_deg:+7.3f}°")
+            print(f"  t={step * _DT:5.1f}s  csTubePitch={pos_deg:+7.3f}°")
 
     # ── Experiment B: Lee velocity hover controller ───────────────────────────
     print(f"\n{'=' * 55}")
-    print(f"Experiment B: Lee velocity hover controller")
+    print("Experiment B: Lee velocity hover controller")
     print(f"  csTubePitch initial = {_KICK_ANGLE:.0f}°, duration = {_DUR_B:.0f} s")
     print(f"{'=' * 55}")
 
@@ -233,7 +235,7 @@ def main():
     robot.update(_DT)
 
     for step in range(_STEPS_B):
-        wrench     = controller.compute(hover_cmd)
+        wrench = controller.compute(hover_cmd)
         thrust_cmd = torch.matmul(wrench, alloc_pinv.T).clamp(min=0.0)
         robot.set_thrust_target(thrust_cmd)
         robot.write_data_to_sim()
@@ -245,7 +247,7 @@ def main():
         time_axis_b.append(step * _DT)
 
         if step % 200 == 0:
-            print(f"  t={step*_DT:5.1f}s  csTubePitch={pos_deg:+7.3f}°")
+            print(f"  t={step * _DT:5.1f}s  csTubePitch={pos_deg:+7.3f}°")
 
     # ── Results summary ───────────────────────────────────────────────────────
     def _half_life(series: list[float], dur: float) -> str:
@@ -257,11 +259,11 @@ def main():
         return f">{dur:.0f} s"
 
     print(f"\n{'=' * 55}")
-    print(f"Summary")
+    print("Summary")
     print(f"  Experiment A (locked root, {_DUR_A:.0f} s):  half-life ≈ {_half_life(pitch_locked, _DUR_A)}")
-    print(f"  Experiment B (hover ctrl,  {_DUR_B:.0f} s):  half-life ≈ {_half_life(pitch_hover,  _DUR_B)}")
+    print(f"  Experiment B (hover ctrl,  {_DUR_B:.0f} s):  half-life ≈ {_half_life(pitch_hover, _DUR_B)}")
     print(f"  Initial angle = {_KICK_ANGLE:.0f}°")
-    print(f"  physxLimit:angular:damping — csTubePitch=0.0, csTubeRoll=0.5 N·m·s/rad (at limits only)")
+    print("  physxLimit:angular:damping — csTubePitch=0.0, csTubeRoll=0.5 N·m·s/rad (at limits only)")
     print(f"{'=' * 55}\n")
 
     # ── Plot — two subplots share y-axis so amplitudes are directly comparable ─
@@ -269,7 +271,7 @@ def main():
 
     ax_a.plot(time_axis_a, pitch_locked, color="tab:blue", linewidth=1.0)
     ax_a.axhline(0.0, color="gray", linewidth=0.6, linestyle="--")
-    ax_a.axhline( _KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
+    ax_a.axhline(_KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
     ax_a.axhline(-_KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
     ax_a.set_xlabel("Time [s]")
     ax_a.set_ylabel("csTubePitch [deg]")
@@ -278,15 +280,14 @@ def main():
 
     ax_b.plot(time_axis_b, pitch_hover, color="tab:orange", linewidth=1.0)
     ax_b.axhline(0.0, color="gray", linewidth=0.6, linestyle="--")
-    ax_b.axhline( _KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
+    ax_b.axhline(_KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
     ax_b.axhline(-_KICK_ANGLE / 2, color="tab:gray", linewidth=0.8, linestyle=":", alpha=0.6)
     ax_b.set_xlabel("Time [s]")
     ax_b.set_title(f"B: hover controller ({_DUR_B:.0f} s)\nhalf-life ≈ {_half_life(pitch_hover, _DUR_B)}")
     ax_b.grid(True, alpha=0.3)
 
     fig.suptitle(
-        f"Chainsaw swing decay — csTubePitch, initial = {_KICK_ANGLE:.0f}°  |  "
-        f"dotted lines = ±half-amplitude",
+        f"Chainsaw swing decay — csTubePitch, initial = {_KICK_ANGLE:.0f}°  |  dotted lines = ±half-amplitude",
         fontsize=11,
     )
     fig.tight_layout()

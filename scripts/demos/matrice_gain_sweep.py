@@ -29,6 +29,7 @@ import math
 from dataclasses import dataclass
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
@@ -53,6 +54,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab_contrib.assets import Multirotor
 from isaaclab_contrib.controllers.lee_velocity_control import LeeVelController
 from isaaclab_contrib.controllers.lee_velocity_control_cfg import LeeVelControllerCfg
+
 from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
 
 # ── Gain configurations ────────────────────────────────────────────────────────
@@ -61,10 +63,10 @@ from isaaclab_assets.robots.arl_robot_1 import MATRICE_CFG
 #   K_vel_xy (2.9–3.5), K_rot_z (10.0–12.2), K_angvel_z (5.3–6.4), K_vel_z (1.7–2.1)
 _CONFIGS = [
     ("Nominal", 32.33, 15.73, 3.49, 12.93, 6.31, 2.10),
-    ("Min-all", 29.1,  14.2,  3.1,  11.6,  5.7,  1.9 ),
-    ("Max-all", 35.6,  17.3,  3.8,  14.2,  6.9,  2.3 ),
-    ("Worst-ζ", 35.6,  14.2,  3.8,  14.2,  5.7,  2.3 ),   # high K_rot, low K_angvel
-    ("Best-ζ",  29.1,  17.3,  3.1,  11.6,  6.9,  1.9 ),   # low K_rot, high K_angvel
+    ("Min-all", 29.1, 14.2, 3.1, 11.6, 5.7, 1.9),
+    ("Max-all", 35.6, 17.3, 3.8, 14.2, 6.9, 2.3),
+    ("Worst-ζ", 35.6, 14.2, 3.8, 14.2, 5.7, 2.3),  # high K_rot, low K_angvel
+    ("Best-ζ", 29.1, 17.3, 3.1, 11.6, 6.9, 1.9),  # low K_rot, high K_angvel
 ]
 
 _COLORS = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
@@ -118,26 +120,32 @@ def _reset_robot(robot: Multirotor, device: str) -> None:
     robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros((1, 6), device=device), env_ids=None)
     default_pos = robot.data.default_joint_pos.torch.clone()
     robot.write_joint_position_to_sim_index(position=default_pos, joint_ids=None, env_ids=None)
-    robot.write_joint_velocity_to_sim_index(
-        velocity=torch.zeros_like(default_pos), joint_ids=None, env_ids=None
-    )
+    robot.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(default_pos), joint_ids=None, env_ids=None)
 
 
 def _set_gains(
     controller: LeeVelController,
-    K_rot_xy: float, K_angvel_xy: float, K_vel_xy: float,
-    K_rot_z: float,  K_angvel_z: float,  K_vel_z: float,
+    K_rot_xy: float,
+    K_angvel_xy: float,
+    K_vel_xy: float,
+    K_rot_z: float,
+    K_angvel_z: float,
+    K_vel_z: float,
     device: str,
 ) -> None:
-    controller.K_rot_current[:]    = torch.tensor([[K_rot_xy,   K_rot_xy,   K_rot_z]],   device=device)
+    controller.K_rot_current[:] = torch.tensor([[K_rot_xy, K_rot_xy, K_rot_z]], device=device)
     controller.K_angvel_current[:] = torch.tensor([[K_angvel_xy, K_angvel_xy, K_angvel_z]], device=device)
-    controller.K_vel_current[:]    = torch.tensor([[K_vel_xy,   K_vel_xy,   K_vel_z]],   device=device)
+    controller.K_vel_current[:] = torch.tensor([[K_vel_xy, K_vel_xy, K_vel_z]], device=device)
 
 
 def _run_config(
     label: str,
-    K_rot_xy: float, K_angvel_xy: float, K_vel_xy: float,
-    K_rot_z: float,  K_angvel_z: float,  K_vel_z: float,
+    K_rot_xy: float,
+    K_angvel_xy: float,
+    K_vel_xy: float,
+    K_rot_z: float,
+    K_angvel_z: float,
+    K_vel_z: float,
     I_att: float,
     robot: Multirotor,
     controller: LeeVelController,
@@ -148,20 +156,26 @@ def _run_config(
     device: str,
 ) -> RunResult:
     zeta = K_angvel_xy / (2.0 * math.sqrt(K_rot_xy * I_att))
-    print(f"  {label:10s}  K_rot={K_rot_xy:.1f}  K_angvel={K_angvel_xy:.1f}"
-          f"  K_vel={K_vel_xy:.1f}  ζ={zeta:.3f}")
+    print(f"  {label:10s}  K_rot={K_rot_xy:.1f}  K_angvel={K_angvel_xy:.1f}  K_vel={K_vel_xy:.1f}  ζ={zeta:.3f}")
 
     _reset_robot(robot, device)
     _set_gains(controller, K_rot_xy, K_angvel_xy, K_vel_xy, K_rot_z, K_angvel_z, K_vel_z, device)
-    controller.compute(torch.zeros((1, 4), device=device))   # warm-start
+    controller.compute(torch.zeros((1, 4), device=device))  # warm-start
     robot.write_data_to_sim()
     sim.step()
     robot.update(_DT)
 
     result = RunResult(
-        label=label, zeta=zeta,
-        t=[], vx_cmd=[], vx_act=[], vy_cmd=[], vy_act=[],
-        pitch=[], roll=[], yaw_rate=[],
+        label=label,
+        zeta=zeta,
+        t=[],
+        vx_cmd=[],
+        vx_act=[],
+        vy_cmd=[],
+        vy_act=[],
+        pitch=[],
+        roll=[],
+        yaw_rate=[],
     )
 
     for step in range(total_steps):
@@ -184,7 +198,7 @@ def _run_config(
         result.vy_cmd.append(float(cmd_cpu[1]))
         result.vy_act.append(float(vel_b[1]))
         result.pitch.append(float(pitch_rad[0]) * 180.0 / math.pi)
-        result.roll.append(float(roll_rad[0])   * 180.0 / math.pi)
+        result.roll.append(float(roll_rad[0]) * 180.0 / math.pi)
         result.yaw_rate.append(float(robot.data.root_ang_vel_b.torch[0, 2].detach().cpu()))
 
     return result
@@ -209,10 +223,10 @@ def _save_plot(results: list[RunResult], boundaries: list[tuple[int, str]]) -> N
 
     for res, color in zip(results, _COLORS):
         legend_label = f"{res.label}  (ζ={res.zeta:.2f})"
-        ax_vx.plot(res.t, res.vx_act,   color=color, linewidth=1.3, label=legend_label)
-        ax_vy.plot(res.t, res.vy_act,   color=color, linewidth=1.3, label=legend_label)
-        ax_att.plot(res.t, res.pitch,   color=color, linewidth=1.3, label=f"{res.label} pitch")
-        ax_att.plot(res.t, res.roll,    color=color, linewidth=0.8, linestyle="--", alpha=0.6)
+        ax_vx.plot(res.t, res.vx_act, color=color, linewidth=1.3, label=legend_label)
+        ax_vy.plot(res.t, res.vy_act, color=color, linewidth=1.3, label=legend_label)
+        ax_att.plot(res.t, res.pitch, color=color, linewidth=1.3, label=f"{res.label} pitch")
+        ax_att.plot(res.t, res.roll, color=color, linewidth=0.8, linestyle="--", alpha=0.6)
         ax_yaw.plot(res.t, res.yaw_rate, color=color, linewidth=1.3, label=legend_label)
 
     for ax in axes:
@@ -224,9 +238,9 @@ def _save_plot(results: list[RunResult], boundaries: list[tuple[int, str]]) -> N
         for ax in axes:
             ax.axvline(t, color="gray", linewidth=0.7, linestyle=":")
         if label != "Hover":
-            ax_vx.text(t + 0.05, 1.0, label,
-                       transform=ax_vx.get_xaxis_transform(),
-                       fontsize=7, color="dimgray", va="top")
+            ax_vx.text(
+                t + 0.05, 1.0, label, transform=ax_vx.get_xaxis_transform(), fontsize=7, color="dimgray", va="top"
+            )
 
     ax_vx.legend(loc="upper right", ncol=2, fontsize=7)
     ax_vy.legend(loc="upper right", ncol=2, fontsize=7)
@@ -274,7 +288,7 @@ def main():
     )
     print(f"\n[INFO] PhysX I_att = {I_att:.4f} kg·m²  (used for ζ calculations)")
 
-    alloc      = torch.tensor(robot_cfg.allocation_matrix, device=device, dtype=torch.float32)
+    alloc = torch.tensor(robot_cfg.allocation_matrix, device=device, dtype=torch.float32)
     alloc_pinv = torch.linalg.pinv(alloc)
     commands, boundaries, total_steps = _build_commands(_SEQUENCE, device)
 
@@ -283,10 +297,25 @@ def main():
     results: list[RunResult] = []
     for cfg in _CONFIGS:
         label, K_rot_xy, K_angvel_xy, K_vel_xy, K_rot_z, K_angvel_z, K_vel_z = cfg
-        results.append(_run_config(
-            label, K_rot_xy, K_angvel_xy, K_vel_xy, K_rot_z, K_angvel_z, K_vel_z,
-            I_att, robot, controller, alloc_pinv, commands, total_steps, sim, device,
-        ))
+        results.append(
+            _run_config(
+                label,
+                K_rot_xy,
+                K_angvel_xy,
+                K_vel_xy,
+                K_rot_z,
+                K_angvel_z,
+                K_vel_z,
+                I_att,
+                robot,
+                controller,
+                alloc_pinv,
+                commands,
+                total_steps,
+                sim,
+                device,
+            )
+        )
 
     print("\nDone. Generating plot …")
     _save_plot(results, boundaries)

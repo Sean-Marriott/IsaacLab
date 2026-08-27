@@ -20,27 +20,23 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.utils.noise import UniformNoiseCfg as Unoise
-from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
-
 from isaaclab.utils.modifiers import DelayedObservationCfg
+from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 from isaaclab_contrib.assets import MultirotorCfg
 from isaaclab_contrib.controllers import LeeVelControllerCfg
-import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
 
+import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
 from isaaclab_tasks.manager_based.drone_arl.mdp.commands import DroneUniformPoseCommandCfg
 from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
-    ang_vel_xyz_exp,
-    distance_to_goal_exp,
-    lin_vel_xyz_exp,
-    yaw_aligned,
-    distance_to_goal_tanh,
-    distance_to_goal_l2,
     PoleEnergy,
+    distance_to_goal_l2,
+    yaw_aligned,
 )
 
 EPISODE_LENGTH_SECONDS = 20.0
+
 
 ##
 # Scene definition
@@ -106,8 +102,8 @@ class ActionsCfg:
             max_inclination_angle_rad=1.0471975511965976,
             max_yaw_rate=1.0471975511965976,
         ),
-        max_velocity=0.5,       # 0.5 m/s
-        max_yaw_rate=0.7853982, # 45 deg/s
+        max_velocity=0.5,  # 0.5 m/s
+        max_yaw_rate=0.7853982,  # 45 deg/s
     )
 
 
@@ -118,16 +114,16 @@ class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
-        
+
         base_link_position = ObsTerm(func=mdp.root_pos_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_orientation = ObsTerm(func=mdp.root_quat_w, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
-        
+
         joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos, 
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},  
-            noise=Gnoise(mean=0.0, std=0.0175), 
+            func=mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},
+            noise=Gnoise(mean=0.0, std=0.0175),
             modifiers=[
                 DelayedObservationCfg(
                     min_lag=0,
@@ -138,8 +134,8 @@ class ObservationsCfg:
                     per_env_phase=True,
                 )
             ],
-        ) # ~1.0°/s std
-        
+        )  # ~1.0°/s std
+
         joint_pitch_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"])},
@@ -154,8 +150,8 @@ class ObservationsCfg:
                     per_env_phase=True,
                 )
             ],
-        ) # ~2.0°/s std
-        
+        )  # ~2.0°/s std
+
         joint_roll_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"])},
@@ -170,11 +166,10 @@ class ObservationsCfg:
                     per_env_phase=True,
                 )
             ],
-        ) # ~7.0°/s std
-        
-        
+        )  # ~7.0°/s std
+
         last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
-        
+
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
@@ -209,17 +204,17 @@ class EventCfg:
             },
         },
     )
-    
+
     reset_chainsaw_pitch = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "position_range": (-math.pi/3, math.pi/3),
+            "position_range": (-math.pi / 3, math.pi / 3),
             "velocity_range": (-0.2, 0.2),
             "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"]),
-        }
+        },
     )
-    
+
     reset_chainsaw_roll = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -227,9 +222,9 @@ class EventCfg:
             "position_range": (-0.6, 0.6),  # (~±35°)
             "velocity_range": (-0.1, 0.1),
             "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"]),
-        }
+        },
     )
-    
+
     # intervals
     push_robot = EventTerm(
         func=mdp.apply_external_force_torque,
@@ -240,7 +235,7 @@ class EventCfg:
             "torque_range": (-0.05, 0.05),
         },
     )
-    
+
     push_pole = EventTerm(
         func=mdp.apply_external_force_torque,
         mode="interval",
@@ -303,6 +298,7 @@ class RewardsCfg:
     # action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
     # action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
 
+
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
@@ -310,7 +306,7 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -10.0})
     crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 10.0})
-    
+
 
 ##
 # Environment configuration
@@ -322,9 +318,7 @@ class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the direct-velocity drone position-tracking environment."""
 
     # Scene settings
-    scene: ArlTrackPositionDirectVelSceneCfg = ArlTrackPositionDirectVelSceneCfg(
-        num_envs=4096, env_spacing=2.5
-    )
+    scene: ArlTrackPositionDirectVelSceneCfg = ArlTrackPositionDirectVelSceneCfg(num_envs=4096, env_spacing=2.5)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -337,7 +331,7 @@ class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         self.decimation = 10
-   
+
         self.episode_length_s = EPISODE_LENGTH_SECONDS
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation

@@ -72,6 +72,7 @@ def root_height_below_minimum(
     asset: RigidObject = env.scene[asset_cfg.name]
     return asset.data.root_pos_w.torch[:, 2] < minimum_height
 
+
 def root_height_above_maximum(
     env: ManagerBasedRLEnv, maximum_height: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
@@ -90,7 +91,7 @@ def root_height_above_maximum(
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     return asset.data.root_pos_w.torch[:, 2] > maximum_height
-    
+
 
 """
 Joint terminations.
