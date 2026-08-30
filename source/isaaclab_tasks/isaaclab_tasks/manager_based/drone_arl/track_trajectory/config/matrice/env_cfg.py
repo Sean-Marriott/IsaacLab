@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_assets.robots.arl_robot_1 import MATRICE_CLEAN_CFG
+from isaaclab_assets.robots.arl_robot_1 import MATRICE_CLEAN_CFG, MATRICE_PRUNER_CFG
 
 from .track_trajectory_env_cfg import TrackTrajectoryEnvCfg
 

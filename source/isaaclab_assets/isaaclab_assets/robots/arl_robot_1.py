@@ -19,7 +19,8 @@ _M350_ROBOTS_DIR = (
     pathlib.Path(__file__).parents[3] / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based" / "drone_arl" / "robots"
 )
 
-_M350_USD_PATH = str(_M350_ROBOTS_DIR / "M350-chainsaw.usd")
+_M350_PRUNER_USD_PATH = str(_M350_ROBOTS_DIR / "M350-pruner.usd")
+_M350_CHAINSAW_USD_PATH = str(_M350_ROBOTS_DIR / "M350-chainsaw.usd")
 _M350_CLEAN_USD_PATH = str(_M350_ROBOTS_DIR / "M350.usd")
 
 from isaaclab_contrib.actuators import ThrusterCfg
@@ -138,7 +139,7 @@ MATRICE_THRUSTER = ThrusterCfg(
 
 MATRICE_CFG = MultirotorCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=_M350_USD_PATH,
+        usd_path=_M350_CHAINSAW_USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -202,6 +203,48 @@ MATRICE_CLEAN_THRUSTER = ThrusterCfg(
 MATRICE_CLEAN_CFG = MultirotorCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=_M350_CLEAN_USD_PATH,
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+    ),
+    init_state=MultirotorCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.0),
+        lin_vel=(0.0, 0.0, 0.0),
+        ang_vel=(0.0, 0.0, 0.0),
+        rot=(0.0, 0.0, 0.0, 1.0),
+        rps={
+            "back_left_prop": 68.98,
+            "back_right_prop": 68.98,
+            "front_left_prop": 68.98,
+            "front_right_prop": 68.98,
+        },
+    ),
+    actuators={"thrusters": MATRICE_CLEAN_THRUSTER},
+    rotor_directions=[-1, 1, -1, 1],
+    allocation_matrix=[
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [-0.3182, -0.3182, 0.3161, 0.3161],
+        [-0.3382, 0.3382, 0.3786, -0.3786],
+        [-0.05, 0.05, -0.05, 0.05],
+    ],
+)
+
+
+MATRICE_PRUNER_CFG = MultirotorCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=_M350_PRUNER_USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
