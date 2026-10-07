@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_assets.robots.arl_robot_1 import MATRICE_CLEAN_CFG, MATRICE_PRUNER_CFG
+from isaaclab_assets.robots.arl_robot_1 import MATRICE_PRUNER_CFG, MATRICE_CFG
 
 from .track_trajectory_env_cfg import TrackTrajectoryEnvCfg
 
@@ -16,7 +16,7 @@ class MatriceCleanTrajectoryEnvCfg(TrackTrajectoryEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.scene.robot = MATRICE_CLEAN_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot = MATRICE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.actuators["thrusters"].dt = self.sim.dt
 
         # Gains derived from the PhysX inertia measured on the clean airframe:

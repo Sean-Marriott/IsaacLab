@@ -241,11 +241,11 @@ def velocity_to_goal_reward_curriculum(
     # get the center of the environment
     command = env.command_manager.get_command(command_name)
 
-    current_position = wp.to_torch(asset.data.root_pos_w) - env.scene.env_origins
+    current_position = asset.data.root_pos_w.torch - env.scene.env_origins
     direction_to_goal = command[:, :3] - current_position
     direction_to_goal = direction_to_goal / (torch.norm(direction_to_goal, dim=1, keepdim=True) + 1e-8)
     # compute the reward as the dot product between the velocity and the direction to the goal
-    velocity_towards_goal = torch.sum(wp.to_torch(asset.data.root_lin_vel_w) * direction_to_goal, dim=1)
+    velocity_towards_goal = torch.sum(asset.data.root_lin_vel_w.torch * direction_to_goal, dim=1)
 
     # Get curriculum term and compute weight
     curriculum_term = get_obstacle_curriculum_term(env)
@@ -352,12 +352,12 @@ def upright_while_moving(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Sce
     asset: Articulation = env.scene[asset_cfg.name]
 
     # pole error (squared deviation from upright)
-    pitch = asset.data.joint_pos[:, asset_cfg.joint_ids[0]]
-    roll = asset.data.joint_pos[:, asset_cfg.joint_ids[1]]
+    pitch = asset.data.joint_pos.torch[:, asset_cfg.joint_ids[0]]
+    roll = asset.data.joint_pos.torch[:, asset_cfg.joint_ids[1]]
     pole_error_sq = pitch**2 + roll**2
 
     # base speed (horizontal plane)
-    base_speed = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=-1)
+    base_speed = torch.norm(asset.data.root_lin_vel_w.torch[:, :2], dim=-1)
 
     # reward is "upright bonus weighted by how much you're moving"
     # the +0.3 floor keeps stationary upright still slightly rewarded

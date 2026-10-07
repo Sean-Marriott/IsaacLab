@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING
 import torch
 import warp as wp
 
-import omni.physics.tensors.api as physx
-
 import isaaclab.sim as sim_utils
 from isaaclab.app.settings_manager import get_settings_manager
 from isaaclab.markers import VisualizationMarkers
@@ -34,6 +32,8 @@ from .kernels import (
 )
 
 if TYPE_CHECKING:
+    import omni.physics.tensors.api as physx
+
     from isaaclab.sensors.contact_sensor import ContactSensorCfg
 
 

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from isaaclab.managers import ObservationTermCfg
     from isaaclab.sensors.camera.camera import Camera
     from isaaclab.sensors.camera.tiled_camera import TiledCamera
+    from isaaclab.sensors.ray_caster.multi_mesh_ray_caster import MultiMeshRayCaster
     from isaaclab.sensors.ray_caster.multi_mesh_ray_caster_camera import MultiMeshRayCasterCamera
     from isaaclab.sensors.ray_caster.ray_caster_camera import RayCasterCamera
 
@@ -93,7 +94,7 @@ def lidar_scan(
     sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
 
     # Compute Euclidean range to each hit point.
-    ray_vectors_w = sensor.data.ray_hits_w - sensor.data.pos_w.unsqueeze(1)
+    ray_vectors_w = sensor.data.ray_hits_w.torch - sensor.data.pos_w.torch.unsqueeze(1)
     ranges = torch.linalg.norm(ray_vectors_w, dim=-1)
 
     # Replace invalid hits (inf/nan) with max distance.

@@ -219,7 +219,7 @@ class RewardsCfg:
         func=distance_to_goal_l2,
         weight=-5.0,  # negative weight — penalise distance
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "command_name": "target_pose",
         },
     )
@@ -228,7 +228,7 @@ class RewardsCfg:
         func=distance_to_goal_exp,
         weight=25.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 1.5,
             "command_name": "target_pose",
         },
@@ -238,7 +238,7 @@ class RewardsCfg:
         func=distance_to_goal_tanh,
         weight=10.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 0.1,
             "command_name": "target_pose",
         },

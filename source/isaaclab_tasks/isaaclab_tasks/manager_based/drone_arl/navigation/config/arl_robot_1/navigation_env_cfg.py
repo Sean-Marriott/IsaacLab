@@ -245,7 +245,7 @@ class RewardsCfg:
         func=distance_to_goal_exp_curriculum,
         weight=2.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 7.0,
             "command_name": "target_pose",
         },
@@ -254,7 +254,7 @@ class RewardsCfg:
         func=distance_to_goal_exp_curriculum,
         weight=4.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 0.5,
             "command_name": "target_pose",
         },

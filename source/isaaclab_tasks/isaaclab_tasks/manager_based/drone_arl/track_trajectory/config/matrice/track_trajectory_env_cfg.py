@@ -342,8 +342,11 @@ class TerminationsCfg:
         },
     )
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.309})  # 75 deg
-    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -5.0})
-    crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 5.0})
+
+    # I don't these make much sense. Tracking diveregence termination should handle this.
+
+    # crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -5.0})
+    # crash_ceiling = DoneTerm(func=mdp.root_height_above_maximum, params={"maximum_height": 5.0})
 
 
 def ramp_trajectory_difficulty(

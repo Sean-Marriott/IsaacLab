@@ -15,7 +15,6 @@ import numpy as np
 import torch
 import warp as wp
 
-import omni.physics.tensors.api as physx
 from pxr import UsdPhysics
 
 import isaaclab.sim as sim_utils
@@ -30,6 +29,8 @@ from .kernels import resolve_view_ids
 from .rigid_object_collection_data import RigidObjectCollectionData
 
 if TYPE_CHECKING:
+    import omni.physics.tensors.api as physx
+
     from isaaclab.assets.rigid_object_collection.rigid_object_collection_cfg import RigidObjectCollectionCfg
 
 # import logger
