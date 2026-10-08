@@ -104,6 +104,22 @@ class DroneTrajectoryCommandCfg(CommandTermCfg):
     reaching far enough to anticipate curvature.
     """
 
+    end_slowdown_s: float = 0.0
+    """Duration over which the reference is brought smoothly to rest before the hold [s].
+
+    The reference clock is time-warped rather than the amplitudes faded, so the path keeps its
+    shape and only the speed along it drops to zero. The deceleration stays bounded because the
+    warp rate follows a quintic smoothstep. Zero, the default, leaves the reference moving for the
+    whole episode.
+    """
+
+    end_hold_s: float = 0.0
+    """Duration the reference is held at rest at the end of the episode [s].
+
+    The slowdown starts :attr:`end_slowdown_s` + :attr:`end_hold_s` before the episode ends, so
+    the reference is stationary at its end point for the last :attr:`end_hold_s` seconds.
+    """
+
     num_harmonics: int = 3
     """Number of sinusoids summed per axis."""
 

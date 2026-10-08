@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING
 
 import torch
 
+import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
+from isaaclab.markers import VisualizationMarkersCfg
 
 from .curriculums import get_obstacle_curriculum_term
 
@@ -517,3 +520,127 @@ def yaw_tracking_exp(
     _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w.torch)
     yaw_error = math_utils.wrap_to_pi(command[:, 9] - yaw)
     return torch.exp(-(yaw_error**2) / std**2)
+
+
+class ToolEndTargetExp(ManagerTermBase):
+    """Reward a hanging tool for reaching its target at the end of the trajectory.
+
+    The target is where the tool point would be if the vehicle sat level at the trajectory end point
+    with the payload hanging at rest: the end position plus ``hang_offset`` rotated by the end yaw
+    only. The reward is an exponential kernel on the distance
+    from the tool point to the target, and is zero except during the last ``window_s`` seconds of
+    the episode.
+
+    When the simulation is rendering and ``debug_vis`` is set, the tool point (orange) and its
+    target (cyan) are drawn as spheres on every rendered frame, so their alignment can be inspected
+    over the whole episode.
+
+    The ``params`` of the term configuration are:
+
+    * ``asset_cfg``: SceneEntityCfg identifying the tool body. Must have ``body_names`` configured.
+    * ``std``: Standard deviation used in the exponential kernel [m].
+    * ``window_s``: Length of the window before the episode end in which the reward is active [s].
+    * ``tool_offset``: Tool point in the tool body frame [m].
+    * ``hang_offset``: Tool point relative to the tracked body when the payload hangs at rest below a
+      level vehicle, in the yaw-aligned vehicle frame [m].
+    * ``command_name``: Name of the :class:`DroneTrajectoryCommand` to read the end pose from.
+    * ``debug_vis``: Whether to draw the tool point and target markers. Defaults to True.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        asset_cfg.resolve(env.scene)
+        self._asset: RigidObject = env.scene[asset_cfg.name]
+        self._body_id: int = asset_cfg.body_ids[0]  # type: ignore[index]
+        self._command_term = env.command_manager.get_term(cfg.params.get("command_name", "trajectory"))
+
+        tool_offset = torch.tensor(cfg.params["tool_offset"], device=env.device)
+        hang_offset = torch.tensor(cfg.params["hang_offset"], device=env.device)
+        self._tool_b = tool_offset.expand(env.num_envs, 3)
+        self._target_v = hang_offset.expand(env.num_envs, 3)
+
+        self._tool_visualizer = None
+        self._target_visualizer = None
+        self._debug_vis_handle = None
+        if cfg.params.get("debug_vis", True) and env.sim.is_rendering:
+            # note: imported here because the marker class pulls in USD, and this module is imported
+            # by task configs that are parsed before the simulation app is launched.
+            from isaaclab.markers import VisualizationMarkers
+
+            self._tool_visualizer = VisualizationMarkers(
+                _sphere_marker_cfg("/Visuals/Reward/tool_point", radius=0.02, color=(1.0, 0.35, 0.0))
+            )
+            self._target_visualizer = VisualizationMarkers(
+                _sphere_marker_cfg("/Visuals/Reward/tool_target", radius=0.02, color=(0.0, 0.9, 0.9))
+            )
+            # Drawn from the post-update event, like the command debug markers, rather than from
+            # :meth:`__call__`: rewards are computed after the step has been rendered, so markers set
+            # there would trail the drawn robot by a full policy step.
+            import omni.kit.app
+
+            self._debug_vis_handle = (
+                omni.kit.app.get_app_interface()
+                .get_post_update_event_stream()
+                .create_subscription_to_pop(lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event))
+            )
+
+    def __del__(self):
+        if self._debug_vis_handle is not None:
+            self._debug_vis_handle.unsubscribe()
+            self._debug_vis_handle = None
+
+    def _tool_and_target(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tool point and its end target [m], in the environment-local world frame, shape (num_envs, 3) each."""
+        body_pos = self._asset.data.body_pos_w.torch[:, self._body_id] - self._env.scene.env_origins
+        body_quat = self._asset.data.body_quat_w.torch[:, self._body_id]
+        tool_pos = body_pos + math_utils.quat_apply(body_quat, self._tool_b)
+
+        cmd = self._command_term
+        zeros = torch.zeros_like(cmd.yaw_end)
+        end_yaw_quat = math_utils.quat_from_euler_xyz(zeros, zeros, cmd.yaw_end)
+        target = cmd.pos_end_w + math_utils.quat_apply(end_yaw_quat, self._target_v)
+        return tool_pos, target
+
+    def _debug_vis_callback(self, event):
+        # note: needed in case the robot is de-initialized, since its data cannot be accessed then
+        if not self._asset.is_initialized:
+            return
+        tool_pos, target = self._tool_and_target()
+        origins = self._env.scene.env_origins
+        self._tool_visualizer.visualize(tool_pos + origins)
+        self._target_visualizer.visualize(target + origins)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        std: float,
+        window_s: float,
+        tool_offset: tuple[float, float, float],
+        hang_offset: tuple[float, float, float],
+        command_name: str = "trajectory",
+        debug_vis: bool = True,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with values in [0, 1].
+        """
+        tool_pos, target = self._tool_and_target()
+        cmd = self._command_term
+        error_square = torch.sum(torch.square(tool_pos - target), dim=1)
+        active = cmd.ref_time >= cmd.episode_length_s - window_s
+        return torch.exp(-error_square / std**2) * active
+
+
+def _sphere_marker_cfg(prim_path: str, radius: float, color: tuple[float, float, float]) -> VisualizationMarkersCfg:
+    """Build a standalone single-sphere marker configuration."""
+    return VisualizationMarkersCfg(
+        prim_path=prim_path,
+        markers={
+            "sphere": sim_utils.SphereCfg(
+                radius=radius, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+            )
+        },
+    )

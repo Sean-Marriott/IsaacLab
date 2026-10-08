@@ -246,6 +246,38 @@ def evaluate_trajectory(
     return position, velocity, acceleration
 
 
+def warp_time(
+    time: torch.Tensor, slowdown_start: float, slowdown_duration: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Map wall time onto a reference clock that decelerates smoothly to a stop.
+
+    The clock rate is ``1 - S(u)``, where ``S`` is the quintic smoothstep and
+    ``u = (t - slowdown_start) / slowdown_duration`` clamped to ``[0, 1]``. Before the slowdown the
+    clock runs at wall rate; after it the clock is frozen at ``slowdown_start + slowdown_duration / 2``.
+    A reference ``f(tau)`` composed with this clock has velocity ``f'(tau) * tau'`` and acceleration
+    ``f''(tau) * tau'**2 + f'(tau) * tau''``, both continuous and zero once the clock stops.
+
+    Args:
+        time: Wall time [s], any shape.
+        slowdown_start: Wall time at which the deceleration starts [s].
+        slowdown_duration: Duration of the deceleration [s]. Non-positive disables the warp.
+
+    Returns:
+        A tuple ``(tau, tau_dot, tau_ddot)`` of the warped time [s], its rate [-] and its second
+        derivative [1/s], each the shape of :paramref:`time`.
+    """
+    if slowdown_duration <= 0.0:
+        return time, torch.ones_like(time), torch.zeros_like(time)
+    u = ((time - slowdown_start) / slowdown_duration).clamp(0.0, 1.0)
+    smoothstep = u**3 * (10.0 - 15.0 * u + 6.0 * u**2)
+    # Integral of (1 - smoothstep) from 0 to u, which reaches 0.5 at u = 1.
+    integral = u - (2.5 * u**4 - 3.0 * u**5 + u**6)
+    tau = torch.clamp(time, max=slowdown_start) + slowdown_duration * integral
+    tau_dot = 1.0 - smoothstep
+    tau_ddot = -30.0 * u**2 * (1.0 - u) ** 2 / slowdown_duration
+    return tau, tau_dot, tau_ddot
+
+
 def sample_yaw_params(
     num_envs: int,
     yaw_mode: str,
@@ -392,6 +424,12 @@ class DroneTrajectoryCommand(CommandTerm):
         self.yaw_ref = torch.zeros(num_envs, device=device)
         self.yaw_rate_ref = torch.zeros_like(self.yaw_ref)
         self.lookahead_w = torch.zeros(num_envs, self.num_lookahead, 3, device=device)
+        # Wall time at which the current reference was evaluated, and the pose it comes to rest at.
+        # The end pose is only a fixed point when :attr:`cfg.end_slowdown_s` is non-zero; otherwise it
+        # is wherever the reference happens to be when the episode times out.
+        self.ref_time = torch.zeros(num_envs, device=device)
+        self.pos_end_w = torch.zeros_like(self.pos_ref_w)
+        self.yaw_end = torch.zeros_like(self.yaw_ref)
         self._command = torch.zeros(num_envs, 11 + 3 * self.num_lookahead, device=device)
 
         # -- metrics. ``CommandTerm.reset`` logs the value *at reset*, which for a moving reference
@@ -407,6 +445,10 @@ class DroneTrajectoryCommand(CommandTerm):
         self._yaw_error_sum = torch.zeros(num_envs, device=device)
         self._ref_speed_sum = torch.zeros(num_envs, device=device)
         self._step_count = torch.zeros(num_envs, device=device)
+
+        # -- end-of-episode slowdown
+        self.episode_length_s = env.cfg.episode_length_s
+        self._slowdown_start = self.episode_length_s - cfg.end_hold_s - cfg.end_slowdown_s
 
         # -- debug visualization
         self._path_vis_times = torch.linspace(0.0, env.cfg.episode_length_s, cfg.num_path_vis_points, device=device)
@@ -498,6 +540,22 @@ class DroneTrajectoryCommand(CommandTerm):
             self._amplitude[env_ids], self._omega[env_ids], self._phase[env_ids], self._center[env_ids], time
         )
 
+    def _warp_time(self, time: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the end-of-episode slowdown to wall time. See :func:`warp_time`."""
+        return warp_time(time, self._slowdown_start, self.cfg.end_slowdown_s)
+
+    def _update_end_pose(self, env_ids: Sequence[int] | torch.Tensor):
+        """Evaluate the pose the reference holds at the end of the episode."""
+        tau_end, _, _ = self._warp_time(torch.full((len(env_ids),), self.episode_length_s, device=self.device))
+        self.pos_end_w[env_ids], _, _ = self._evaluate_position(env_ids, tau_end)
+        self.yaw_end[env_ids], _ = evaluate_yaw(
+            self._yaw_0[env_ids],
+            self._yaw_amplitude[env_ids],
+            self._yaw_omega[env_ids],
+            self._yaw_phase[env_ids],
+            tau_end,
+        )
+
     def evaluate_at(self, env_ids: Sequence[int] | torch.Tensor | slice, time: torch.Tensor):
         """Evaluate the reference at ``time`` and refresh the public buffers and command tensor.
 
@@ -505,16 +563,23 @@ class DroneTrajectoryCommand(CommandTerm):
             env_ids: Indices of the environments to evaluate, or ``slice(None)`` for all.
             time: Evaluation time [s], shape ``(len(env_ids),)``.
         """
-        pos, vel, acc = self._evaluate_position(env_ids, time)
+        tau, tau_dot, tau_ddot = self._warp_time(time)
+        pos, vel, acc = self._evaluate_position(env_ids, tau)
+        # chain rule through the warped clock; identity when no slowdown is configured
+        acc = acc * tau_dot.unsqueeze(-1) ** 2 + vel * tau_ddot.unsqueeze(-1)
+        vel = vel * tau_dot.unsqueeze(-1)
         yaw, yaw_rate = evaluate_yaw(
             self._yaw_0[env_ids],
             self._yaw_amplitude[env_ids],
             self._yaw_omega[env_ids],
             self._yaw_phase[env_ids],
-            time,
+            tau,
         )
-        lookahead, _, _ = self._evaluate_position(env_ids, time.unsqueeze(-1) + self._lookahead_times)
+        yaw_rate = yaw_rate * tau_dot
+        lookahead_tau, _, _ = self._warp_time(time.unsqueeze(-1) + self._lookahead_times)
+        lookahead, _, _ = self._evaluate_position(env_ids, lookahead_tau)
 
+        self.ref_time[env_ids] = time
         self.pos_ref_w[env_ids] = pos
         self.vel_ref_w[env_ids] = vel
         self.acc_ref_w[env_ids] = acc
@@ -538,6 +603,7 @@ class DroneTrajectoryCommand(CommandTerm):
         if len(pending) > 0:
             self.sample_parameters(pending)
         self._sampled_by_event[env_ids] = False
+        self._update_end_pose(env_ids)
 
         self._time[env_ids] = 0.0
         self._error_sum[env_ids] = 0.0
@@ -688,7 +754,8 @@ class DroneTrajectoryCommand(CommandTerm):
 
         # -- the whole path, which only changes when a trajectory is resampled
         if self._path_vis_dirty:
-            path, _, _ = self._evaluate_position(slice(n), self._path_vis_time_grid(n))
+            path_tau, _, _ = self._warp_time(self._path_vis_time_grid(n))
+            path, _, _ = self._evaluate_position(slice(n), path_tau)
             self._path_vis_points = (path + origins.unsqueeze(1)).reshape(-1, 3)
             self._path_vis_dirty = False
         self.path_visualizer.visualize(self._path_vis_points)
