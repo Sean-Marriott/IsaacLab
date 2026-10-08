@@ -137,6 +137,7 @@ def _flat_orientation_l2_kernel(
     out[i] = g[0] * g[0] + g[1] * g[1]
 
 
+# Remove if the bottom one works
 def flat_orientation_l2(env: ManagerBasedRLEnv, out, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> None:
     """Penalize non-flat base orientation using L2 squared kernel."""
     asset: Articulation = env.scene[asset_cfg.name]
@@ -148,6 +149,27 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, out, asset_cfg: SceneEntityCfg =
     )
 
 
+# def flat_orientation_l2(
+#     env: ManagerBasedRLEnv,
+#     out,
+#     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+#     body_name: str = "pruner"
+# ) -> None:
+#     asset: Articulation = env.scene[asset_cfg.name]
+
+#     # 1. Find the index of your tool link by name
+#     body_idx = asset.find_bodies(body_name)[0]  # Returns list of indices
+
+#     # 2. Slice the 2D array to get a 1D view (no memory copy)
+#     tool_poses = asset.data.link_pose_w[:, body_idx]  # Shape: (num_envs,)
+
+#     # 3. Launch with the SAME kernel, just pass the sliced array
+#     wp.launch(
+#         kernel=_flat_orientation_l2_kernel,
+#         dim=env.num_envs,
+#         inputs=[tool_poses.warp, asset.data.GRAVITY_VEC_W.warp, out],
+#         device=env.device,
+#     )
 """
 Joint penalties.
 """
