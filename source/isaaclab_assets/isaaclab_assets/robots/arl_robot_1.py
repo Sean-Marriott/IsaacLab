@@ -21,6 +21,7 @@ _M350_ROBOTS_DIR = (
 
 _M350_PRUNER_USD_PATH = str(_M350_ROBOTS_DIR / "M350-pruner.usd")
 _M350_CHAINSAW_USD_PATH = str(_M350_ROBOTS_DIR / "M350-chainsaw.usd")
+_M350_CHAINSAW_MK3_USD_PATH = str(_M350_ROBOTS_DIR / "M350-chainsaw-mk3.usd")
 _M350_CLEAN_USD_PATH = str(_M350_ROBOTS_DIR / "M350.usd")
 
 from isaaclab_contrib.actuators import ThrusterCfg
@@ -281,4 +282,27 @@ MATRICE_PRUNER_CFG = MultirotorCfg(
         [-0.3382, 0.3382, 0.3786, -0.3786],
         [-0.05, 0.05, -0.05, 0.05],
     ],
+)
+
+
+# DJI Matrice 350 RTK with the Mk3 chainsaw head.
+# Same airframe, motor positions and thruster model as MATRICE_CFG, but the USD names differ: the
+# airframe body is ``body`` (``base_link`` is now the chainsaw head mount) and the rotors are
+# ``rotor0``-``rotor3``. Listed in articulation body order, which is the order thrust is allocated
+# in -- front-left, front-right, back-right, back-left, exactly as MATRICE_CFG resolves its props --
+# so the allocation matrix and rotor directions carry over unchanged.
+#   body 5.968 kg, rotors 4 x 0.133 kg, jetson 0.5 kg, top_hinge 0.1 kg, main_tube 0.065 kg,
+#   head: base_link 0.036 kg, roll_link (saw) 1.858 kg, feed_arm_link 0.050 kg  -> total 9.109 kg
+# Hover thrust per motor = 9.109 * 9.81 / 4 = 22.34 N, so with k_f = 3.35e-3 N/rps^2 the hover
+# speed is sqrt(22.34 / 3.35e-3) = 81.66 rps.
+#
+# The tube is authored horizontal, so the hinge angles at rest are far from zero. The defaults below
+# are where the payload settles hanging below a level, stationary airframe (measured in PhysX).
+MATRICE_MK3_CFG = MATRICE_CFG.replace(
+    spawn=MATRICE_CFG.spawn.replace(usd_path=_M350_CHAINSAW_MK3_USD_PATH),
+    init_state=MATRICE_CFG.init_state.replace(
+        rps={"rotor2": 81.66, "rotor0": 81.66, "rotor3": 81.66, "rotor1": 81.66},
+        joint_pos={"csTubePitch": 1.5624, "csTubeRoll": 0.0099, "root_joint": -1.6617},
+    ),
+    actuators={"thrusters": MATRICE_THRUSTER.replace(thruster_names_expr=["rotor2", "rotor0", "rotor3", "rotor1"])},
 )
