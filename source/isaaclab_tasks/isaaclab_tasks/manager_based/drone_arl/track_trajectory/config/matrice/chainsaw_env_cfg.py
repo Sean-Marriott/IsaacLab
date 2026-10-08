@@ -23,13 +23,18 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
 
+import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
+from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
+    ToolEndTargetExp,
+    distance_to_goal_exp,
+    velocity_tracking_exp,
+    yaw_tracking_exp,
+)
+
 from isaaclab_assets.robots.arl_robot_1 import MATRICE_MK3_CFG
 
-import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
-from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import ToolEndTargetExp
-
 from .env_cfg import MatriceCleanTrajectoryEnvCfg
-from .track_trajectory_env_cfg import COMMAND_NAME, _MEASUREMENT_DELAY, EventCfg, ObservationsCfg, RewardsCfg
+from .track_trajectory_env_cfg import _MEASUREMENT_DELAY, COMMAND_NAME, EventCfg, ObservationsCfg
 
 CHAINSAW_JOINT_NAMES = ["csTubePitch", "csTubeRoll", "root_joint"]
 """Passive payload joints: the tube hinge at the airframe and the saw-head pitch at the tube end."""
@@ -95,24 +100,87 @@ class ChainsawEventCfg(EventCfg):
 
 
 @configclass
-class ChainsawRewardsCfg(RewardsCfg):
-    """Reward terms, with the chainsaw mouth rewarded for reaching its end target."""
+class ChainsawRewardsCfg:
+    """Reward terms, with the chainsaw mouth rewarded for reaching its end target.
 
-    # Active only while the reference holds its end point. At this weight a perfect hold is worth
-    # about 60 against the roughly 400 a perfect tracking episode returns, which is enough to shape
-    # the arrival without letting it trade away tracking along the rest of the path.
+    Every term is listed here rather than inherited from the base ``RewardsCfg``, so the full reward
+    is visible in one place. The tracking and regularization terms match the base values.
+    """
+
+    # -- tracking (same as the base config, but on the airframe rather than ``base_link``)
+    pos_tracking = RewTerm(
+        func=distance_to_goal_exp,
+        weight=1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=[AIRFRAME_BODY_NAME]),
+            "std": 0.54,
+            "command_name": COMMAND_NAME,
+        },
+    )
+    pos_tracking_fine = RewTerm(
+        func=distance_to_goal_exp,
+        weight=0.5,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=[AIRFRAME_BODY_NAME]),
+            "std": 0.15,
+            "command_name": COMMAND_NAME,
+        },
+    )
+    # These two read the articulation root state, not a named body.
+    vel_tracking = RewTerm(
+        func=velocity_tracking_exp,
+        weight=0.3,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.6, "command_name": COMMAND_NAME},
+    )
+    yaw_tracking = RewTerm(
+        func=yaw_tracking_exp,
+        weight=0.2,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.35, "command_name": COMMAND_NAME},
+    )
+
+    # -- regularization (same as the base config)
+    ang_vel_penalty = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.002)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
+    action_magnitude = RewTerm(func=mdp.action_l2, weight=-0.0005)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-20.0)
+
+    # -- chainsaw end target
+    # Two kernels on the same mouth-to-target distance, like the position tracking pair. A single
+    # narrow kernel would give no gradient at the errors an untrained policy starts from (a 0.05 m
+    # kernel is ~1e-4 at 0.15 m), and a single wide one barely distinguishes 0.05 m from 0.15 m.
+    #
+    # The coarse kernel is active from the start of the slowdown, so it steers the approach while
+    # the reference is still decelerating; it carries the gradient out to roughly half a metre.
     tool_end_target = RewTerm(
         func=ToolEndTargetExp,  # type: ignore[arg-type]
-        weight=2.0,
+        weight=1.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=["roll_link"]),
             "std": 0.25,
-            "window_s": END_HOLD_S,
+            "window_s": END_SLOWDOWN_S + END_HOLD_S,
             "tool_offset": CHAINSAW_MOUTH_OFFSET,
             "hang_offset": CHAINSAW_HANG_OFFSET,
             "command_name": COMMAND_NAME,
             # Orange sphere on the cutting mouth, cyan on its end target. Drawn only when rendering.
             "debug_vis": True,
+        },
+    )
+    # The fine kernel is active only during the hold and supplies the precision gradient: about 0.13
+    # at 0.10 m, 0.6 at 0.05 m. With the coarse term the hold is worth up to 5 per step against about
+    # 2 for tracking, so alignment dominates there; over an episode the pair is still worth at most
+    # ~180 against the ~400 of tracking, so it cannot buy its way out of following the path.
+    tool_end_target_fine = RewTerm(
+        func=ToolEndTargetExp,  # type: ignore[arg-type]
+        weight=4.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["roll_link"]),
+            "std": 0.07,
+            "window_s": END_HOLD_S,
+            "tool_offset": CHAINSAW_MOUTH_OFFSET,
+            "hang_offset": CHAINSAW_HANG_OFFSET,
+            "command_name": COMMAND_NAME,
+            # The coarse term already draws the markers; a second set would reuse its prim paths.
+            "debug_vis": False,
         },
     )
 
@@ -133,12 +201,10 @@ class MatriceChainsawTrajectoryEnvCfg(MatriceCleanTrajectoryEnvCfg):
         self.scene.robot.actuators["thrusters"].dt = self.sim.dt
 
         # The shared terms track ``base_link``, which in the Mk3 USD is the saw-head mount. Point them
-        # at the airframe instead.
+        # at the airframe instead. The position rewards already do so in ChainsawRewardsCfg.
         airframe = SceneEntityCfg("robot", body_names=[AIRFRAME_BODY_NAME])
         self.commands.trajectory.body_name = AIRFRAME_BODY_NAME
         for term in (
-            self.rewards.pos_tracking,
-            self.rewards.pos_tracking_fine,
             self.terminations.tracking_divergence,
             self.events.randomize_mass,
             self.events.randomize_com,
