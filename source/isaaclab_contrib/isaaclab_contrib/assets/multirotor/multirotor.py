@@ -391,6 +391,27 @@ class Multirotor(Articulation):
         self._data.default_root_pose = pose_output
         self._data.default_root_vel = vel_output
 
+        # Handle joint state (like parent does). Passive joints, such as a hanging payload, need a
+        # non-zero default so that resetting them to their defaults does not start them off-rest.
+        for attr, values in (
+            ("default_joint_pos", self.cfg.init_state.joint_pos),
+            ("default_joint_vel", self.cfg.init_state.joint_vel),
+        ):
+            indices_list, _, values_list = string_utils.resolve_matching_names_values(values, self.joint_names)
+            if indices_list:
+                wp.to_torch(getattr(self._data, attr))[:, indices_list] = torch.tensor(values_list, device=self.device)
+
+        # Soft joint limits. The parent fills these in while processing joint actuators, which this
+        # class skips, so without this they stay at zero and every joint reset that clamps to them
+        # (e.g. ``reset_joints_by_offset``) pins the joints at zero position and velocity.
+        pos_limits = self._data.joint_pos_limits.torch
+        mid = 0.5 * (pos_limits[..., 0] + pos_limits[..., 1])
+        half_range = 0.5 * (pos_limits[..., 1] - pos_limits[..., 0]) * self.cfg.soft_joint_pos_limit_factor
+        soft_pos_limits = wp.to_torch(self._data.soft_joint_pos_limits)
+        soft_pos_limits[..., 0] = mid - half_range
+        soft_pos_limits[..., 1] = mid + half_range
+        wp.to_torch(self._data.soft_joint_vel_limits)[:] = self._data.joint_vel_limits.torch
+
         # Handle thruster-specific initial state
         if hasattr(self._data, "default_thruster_rps") and hasattr(self.cfg.init_state, "rps"):
             # Match against thruster names
