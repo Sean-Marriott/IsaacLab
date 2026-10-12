@@ -353,6 +353,157 @@ def reset_root_state_on_trajectory(
     asset.write_root_velocity_to_sim_index(root_velocity=velocities, env_ids=env_ids)
 
 
+def push_joints_by_velocity(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    velocity_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Kick the selected joints by adding a random velocity to their current velocity.
+
+    Meant for ``mode="interval"``, to excite a passive joint such as a payload hinge mid-episode.
+    :func:`~isaaclab.envs.mdp.reset_joints_by_offset` is not a substitute: it sets the state about
+    the default, so it would also snap the joint back to rest. This term leaves the positions alone.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to push.
+        velocity_range: Range of the velocity added to each selected joint [m/s or rad/s, depending
+            on joint type].
+        asset_cfg: SceneEntityCfg identifying the asset and the joints to push.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    iter_env_ids = env_ids[:, None] if asset_cfg.joint_ids != slice(None) else env_ids
+
+    joint_vel = asset.data.joint_vel.torch[iter_env_ids, asset_cfg.joint_ids].clone()
+    joint_vel += math_utils.sample_uniform(*velocity_range, joint_vel.shape, joint_vel.device)
+    joint_vel_limits = asset.data.soft_joint_vel_limits.torch[iter_env_ids, asset_cfg.joint_ids]
+    joint_vel = joint_vel.clamp_(-joint_vel_limits, joint_vel_limits)
+    asset.write_joint_velocity_to_sim_index(velocity=joint_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
+
+
+class RandomizePassiveJointDamping(ManagerTermBase):
+    """Scale the simulated damping of unactuated joints by a random factor per environment.
+
+    Passive hinges such as a hanging payload's are often modelled as a joint drive with zero
+    stiffness, so their damping lives on the drive rather than in the joint friction.
+    :func:`~isaaclab.envs.mdp.randomize_joint_parameters` does not touch the drive, and
+    :class:`~isaaclab.envs.mdp.randomize_actuator_gains` only reaches joints that belong to an
+    actuator, which a :class:`~isaaclab_contrib.assets.Multirotor` cannot have. This term writes the
+    drive damping directly.
+
+    The factor is drawn independently for each joint and is applied to the damping the asset had
+    when the term was created, so repeated calls do not compound. The write goes through the CPU
+    tensor API, so the term is meant for ``mode="startup"``.
+
+    Args:
+        cfg: Event term configuration.
+        env: The manager-based RL environment instance.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        asset_cfg.resolve(env.scene)
+        asset: Articulation = env.scene[asset_cfg.name]
+        self._joint_ids = torch.tensor(asset_cfg.joint_ids, dtype=torch.int32, device=asset.device)
+        self._default_damping = asset.data.joint_damping.torch[:, self._joint_ids.long()].clone()
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: torch.Tensor | None,
+        asset_cfg: SceneEntityCfg,
+        scale_range: tuple[float, float] = (0.5, 2.0),
+    ) -> None:
+        """Write the scaled damping of the selected joints into the simulation.
+
+        Args:
+            env: The manager-based RL environment instance.
+            env_ids: Indices of the environments to randomize. All environments if None.
+            asset_cfg: SceneEntityCfg identifying the asset and the joints to randomize.
+            scale_range: Range of the factor applied to the default damping, sampled log-uniformly
+                so that halving and doubling are equally likely.
+        """
+        asset: Articulation = env.scene[asset_cfg.name]
+        if env_ids is None:
+            env_ids = torch.arange(env.num_envs, device=asset.device)
+
+        scale = math_utils.sample_log_uniform(*scale_range, (len(env_ids), len(self._joint_ids)), asset.device)
+        damping = self._default_damping[env_ids] * scale
+        asset.write_joint_damping_to_sim_index(damping=damping, joint_ids=self._joint_ids, env_ids=env_ids)
+
+
+def set_passive_joint_stiffness(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    stiffness: float,
+    scale_range: tuple[float, float] = (1.0, 1.0),
+) -> None:
+    """Give unactuated joints a torsional spring towards zero joint angle.
+
+    The spring is the joint drive's stiffness, so it pulls towards the drive target, which is zero
+    for a passive joint. Use it for physical springs on a hinge, such as the ones holding a balanced
+    payload at its rest pose. Like :class:`RandomizePassiveJointDamping`, it writes the drive directly
+    because a :class:`~isaaclab_contrib.assets.Multirotor` cannot have joint actuators, and it goes
+    through the CPU tensor API, so the term is meant for ``mode="startup"``.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to write. All environments if None.
+        asset_cfg: SceneEntityCfg identifying the asset and the joints to give a spring.
+        stiffness: Spring stiffness [N·m/rad]. Zero removes the spring.
+        scale_range: Range of the factor applied to :paramref:`stiffness`, sampled log-uniformly
+            and independently per environment and joint.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=asset.device)
+    joint_ids = torch.tensor(asset_cfg.joint_ids, dtype=torch.int32, device=asset.device)
+
+    scale = math_utils.sample_log_uniform(*scale_range, (len(env_ids), len(joint_ids)), asset.device)
+    asset.write_joint_stiffness_to_sim_index(stiffness=stiffness * scale, joint_ids=joint_ids, env_ids=env_ids)
+
+
+def set_passive_joint_friction(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    friction: float,
+    scale_range: tuple[float, float] = (1.0, 1.0),
+) -> None:
+    """Give unactuated joints dry (Coulomb) friction.
+
+    Sets the PhysX static and dynamic joint friction to the same value and leaves the viscous
+    coefficient alone. Unlike drive damping, dry friction takes off a fixed amount of swing
+    per cycle regardless of amplitude, and can hold a joint still at a small angle from rest.
+    :func:`~isaaclab.envs.mdp.randomize_joint_parameters` would apply the same value to the viscous
+    coefficient as well, hence this term. It goes through the CPU tensor API, so it is meant for
+    ``mode="startup"``.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to write. All environments if None.
+        asset_cfg: SceneEntityCfg identifying the asset and the joints to give friction.
+        friction: Friction effort [N·m or N, depending on joint type], used for both static and
+            dynamic friction.
+        scale_range: Range of the factor applied to :paramref:`friction`, sampled log-uniformly
+            and independently per environment and joint.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=asset.device)
+    joint_ids = torch.tensor(asset_cfg.joint_ids, dtype=torch.int32, device=asset.device)
+
+    scale = math_utils.sample_log_uniform(*scale_range, (len(env_ids), len(joint_ids)), asset.device)
+    coeff = friction * scale
+    asset.write_joint_friction_coefficient_to_sim_index(
+        joint_friction_coeff=coeff, joint_dynamic_friction_coeff=coeff, joint_ids=joint_ids, env_ids=env_ids
+    )
+
+
 class WindAndDrag(ManagerTermBase):
     """Apply a sustained wind gust and aerodynamic drag as a single combined wrench.
 

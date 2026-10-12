@@ -1302,6 +1302,32 @@ def test_setting_gains_from_cfg_dict(sim, num_articulations, device):
     torch.testing.assert_close(articulation.actuators["body"].damping, expected_damping)
 
 
+@pytest.mark.parametrize("num_articulations", [64])
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.isaacsim_ci
+def test_write_joint_gains_reach_physx(sim, num_articulations, device):
+    """Test that gains written to the simulation are the ones PhysX holds right after the write.
+
+    The writes stage the data through pinned CPU buffers. A device-to-pinned-host copy is
+    asynchronous, so without waiting for it PhysX could read the previous buffer contents instead.
+    """
+    articulation_cfg = generate_articulation_cfg(articulation_type="humanoid")
+    articulation, _ = generate_articulation(articulation_cfg, num_articulations, device=sim.device)
+    sim.reset()
+
+    shape = (articulation.num_instances, articulation.num_joints)
+    for _ in range(20):
+        stiffness = torch.rand(shape, device=articulation.device) * 100.0 + 1.0
+        damping = torch.rand(shape, device=articulation.device) * 10.0 + 0.1
+        articulation.write_joint_stiffness_to_sim_index(stiffness=stiffness)
+        articulation.write_joint_damping_to_sim_index(damping=damping)
+
+        physx_stiffness = wp.to_torch(articulation.root_view.get_dof_stiffnesses()).to(articulation.device)
+        physx_damping = wp.to_torch(articulation.root_view.get_dof_dampings()).to(articulation.device)
+        torch.testing.assert_close(physx_stiffness, stiffness)
+        torch.testing.assert_close(physx_damping, damping)
+
+
 @pytest.mark.parametrize("num_articulations", [1, 2])
 @pytest.mark.parametrize("device", ["cuda:0", "cpu"])
 @pytest.mark.parametrize("vel_limit_sim", [1e5, None])

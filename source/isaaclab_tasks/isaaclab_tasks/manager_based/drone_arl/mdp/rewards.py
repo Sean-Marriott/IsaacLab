@@ -457,6 +457,105 @@ class PoleEnergy(ManagerTermBase):
         return kinetic + potential
 
 
+class PayloadSwingEnergy(ManagerTermBase):
+    """Swing energy of a hanging payload, measured in the world frame [J].
+
+    The payload is treated as a point mass ``m`` at its centre of mass, a distance ``L`` from the
+    pivot it hangs from. With ``theta`` the angle between the pivot-to-COM vector and gravity, and
+    ``v_rel`` the velocity of the COM relative to the pivot point,
+
+    ``E = 1/2 * m * |v_rel|^2 + m * g * L * (1 - cos(theta))``,
+
+    which is zero only when the payload hangs straight down and is not moving relative to the pivot.
+    Nothing here depends on the joints, so it holds for any suspension, and ``m`` and ``L`` come from
+    every body of the payload rather than from one body's own COM offset as in :class:`PoleEnergy`.
+
+    Because the reference is gravity, not the airframe, the quasi-static lean of the payload while
+    the vehicle accelerates counts as swing too: a sustained horizontal acceleration ``a`` holds the
+    payload at ``tan(theta) = a / g``, which costs ``m * g * L * (1 - cos(theta))`` for as long as it
+    lasts. This term therefore penalizes hard acceleration as well as free swinging.
+
+    The payload mass is read on the first call rather than at construction, so that it includes the
+    startup randomization, which runs after the managers are created.
+
+    The ``params`` of the term configuration are:
+
+    * ``payload_cfg``: SceneEntityCfg with every body below the pivot as ``body_names``.
+    * ``pivot_cfg``: SceneEntityCfg with the body whose link frame origin is the pivot.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        payload_cfg: SceneEntityCfg = cfg.params["payload_cfg"]
+        pivot_cfg: SceneEntityCfg = cfg.params["pivot_cfg"]
+        for entity_cfg in (payload_cfg, pivot_cfg):
+            entity_cfg.resolve(env.scene)
+
+        self._asset: Articulation = env.scene[payload_cfg.name]
+        self._payload_ids = payload_cfg.body_ids
+        self._pivot_id: int = pivot_cfg.body_ids[0]  # type: ignore[index]
+        gravity = torch.tensor(env.sim.cfg.gravity, device=env.device)
+        self._gravity = torch.norm(gravity).item()
+        self._down_w = gravity / self._gravity
+        self._mass: torch.Tensor | None = None  # per-body payload mass [kg], shape (num_envs, num_payload_bodies)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        payload_cfg: SceneEntityCfg,
+        pivot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Compute the swing energy.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with the swing energy [J].
+        """
+        data = self._asset.data
+        if self._mass is None:
+            self._mass = data.body_mass.torch[:, self._payload_ids].to(env.device)
+        weights = (self._mass / self._mass.sum(dim=1, keepdim=True)).unsqueeze(-1)
+        total_mass = self._mass.sum(dim=1)
+
+        # Payload COM state relative to the pivot point, in the world frame.
+        com_w = torch.sum(weights * data.body_com_pos_w.torch[:, self._payload_ids], dim=1)
+        com_vel_w = torch.sum(weights * data.body_com_lin_vel_w.torch[:, self._payload_ids], dim=1)
+        offset = com_w - data.body_link_pos_w.torch[:, self._pivot_id]
+        vel_rel = com_vel_w - data.body_link_lin_vel_w.torch[:, self._pivot_id]
+
+        length = torch.norm(offset, dim=-1)
+        cos_tilt = torch.sum(offset * self._down_w, dim=-1) / length.clamp_min(1e-6)
+
+        kinetic = 0.5 * total_mass * torch.sum(vel_rel**2, dim=-1)
+        potential = total_mass * self._gravity * length * (1.0 - cos_tilt)
+        return kinetic + potential
+
+
+class PayloadSwingEnergyExp(PayloadSwingEnergy):
+    """Exponential kernel on :class:`PayloadSwingEnergy`: ``exp(-E / energy_scale)``, in ``[0, 1]``.
+
+    The swing energy grows with the square of the swing amplitude, so this is a Gaussian in the
+    amplitude: on a payload with ``m * g * L`` of about 22.4 J (the Mk3 chainsaw), an ``energy_scale`` of 0.3 J falls to
+    ``1/e`` at a swing of roughly 9.5 deg.
+
+    Takes the same ``params`` as :class:`PayloadSwingEnergy`, plus ``energy_scale`` [J].
+    """
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        payload_cfg: SceneEntityCfg,
+        pivot_cfg: SceneEntityCfg,
+        energy_scale: float = 0.3,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with values in [0, 1].
+        """
+        energy = super().__call__(env, payload_cfg, pivot_cfg)
+        return torch.exp(-energy / energy_scale)
+
+
 """
 Trajectory tracking rewards.
 """
@@ -632,6 +731,124 @@ class ToolEndTargetExp(ManagerTermBase):
         error_square = torch.sum(torch.square(tool_pos - target), dim=1)
         active = cmd.ref_time >= cmd.episode_length_s - window_s
         return torch.exp(-error_square / std**2) * active
+
+
+class DroneEndPoseExp(ManagerTermBase):
+    """Reward the vehicle for matching a target pose at the end of the trajectory.
+
+    The target pose is the trajectory end position with the airframe level and at the end yaw, i.e.
+    hovering at rest at the end point. The reward is a joint exponential kernel on the position
+    error and the orientation error (the angle of the rotation between the two poses), so both
+    have to match for it to be high:
+
+    ``exp(-|p_err|^2 / std_pos^2 - angle_err^2 / std_rot^2)``
+
+    It is zero except during the last ``window_s`` seconds of the episode.
+
+    When the simulation is rendering and ``debug_vis`` is set, the target pose and the current pose
+    of the body are drawn as coordinate frames (x red, y green, z blue) on every rendered frame: the
+    larger frame is the target, the smaller one the vehicle. The target is drawn for the whole
+    episode, so the approach to it can be followed.
+
+    The ``params`` of the term configuration are:
+
+    * ``asset_cfg``: SceneEntityCfg identifying the vehicle body. Must have ``body_names`` configured.
+    * ``std_pos``: Standard deviation of the kernel on the position error [m].
+    * ``std_rot``: Standard deviation of the kernel on the orientation error [rad].
+    * ``window_s``: Length of the window before the episode end in which the reward is active [s].
+    * ``command_name``: Name of the :class:`DroneTrajectoryCommand` to read the end pose from.
+    * ``debug_vis``: Whether to draw the pose markers. Defaults to True.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        asset_cfg.resolve(env.scene)
+        self._asset: RigidObject = env.scene[asset_cfg.name]
+        self._body_id: int = asset_cfg.body_ids[0]  # type: ignore[index]
+        self._command_term = env.command_manager.get_term(cfg.params.get("command_name", "trajectory"))
+
+        self._target_visualizer = None
+        self._current_visualizer = None
+        self._debug_vis_handle = None
+        if cfg.params.get("debug_vis", True) and env.sim.is_rendering:
+            # note: imported here for the same reason as in ToolEndTargetExp.
+            from isaaclab.markers import VisualizationMarkers
+            from isaaclab.markers.config import FRAME_MARKER_CFG
+
+            self._target_visualizer = VisualizationMarkers(
+                _frame_marker_cfg(FRAME_MARKER_CFG, "/Visuals/Reward/drone_end_pose", scale=0.6)
+            )
+            self._current_visualizer = VisualizationMarkers(
+                _frame_marker_cfg(FRAME_MARKER_CFG, "/Visuals/Reward/drone_pose", scale=0.3)
+            )
+            import omni.kit.app
+
+            self._debug_vis_handle = (
+                omni.kit.app.get_app_interface()
+                .get_post_update_event_stream()
+                .create_subscription_to_pop(lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event))
+            )
+
+    def __del__(self):
+        if self._debug_vis_handle is not None:
+            self._debug_vis_handle.unsubscribe()
+            self._debug_vis_handle = None
+
+    def _target_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Target position [m] in the environment-local world frame and orientation (x, y, z, w).
+
+        Shapes are (num_envs, 3) and (num_envs, 4).
+        """
+        cmd = self._command_term
+        zeros = torch.zeros_like(cmd.yaw_end)
+        return cmd.pos_end_w, math_utils.quat_from_euler_xyz(zeros, zeros, cmd.yaw_end)
+
+    def _debug_vis_callback(self, event):
+        # note: needed in case the robot is de-initialized, since its data cannot be accessed then
+        if not self._asset.is_initialized:
+            return
+        target_pos, target_quat = self._target_pose()
+        self._target_visualizer.visualize(target_pos + self._env.scene.env_origins, target_quat)
+        self._current_visualizer.visualize(
+            self._asset.data.body_pos_w.torch[:, self._body_id], self._asset.data.body_quat_w.torch[:, self._body_id]
+        )
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        std_pos: float,
+        std_rot: float,
+        window_s: float,
+        command_name: str = "trajectory",
+        debug_vis: bool = True,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with values in [0, 1].
+        """
+        target_pos, target_quat = self._target_pose()
+        body_pos = self._asset.data.body_pos_w.torch[:, self._body_id] - env.scene.env_origins
+        body_quat = self._asset.data.body_quat_w.torch[:, self._body_id]
+
+        pos_error_sq = torch.sum(torch.square(body_pos - target_pos), dim=1)
+        rot_error = math_utils.quat_error_magnitude(body_quat, target_quat)
+
+        cmd = self._command_term
+        active = cmd.ref_time >= cmd.episode_length_s - window_s
+        return torch.exp(-pos_error_sq / std_pos**2 - torch.square(rot_error) / std_rot**2) * active
+
+
+def _frame_marker_cfg(base_cfg: VisualizationMarkersCfg, prim_path: str, scale: float) -> VisualizationMarkersCfg:
+    """Build a coordinate-frame marker configuration at the given scale, without the connecting line."""
+    # note: ``copy`` is deep, so changing the scale does not alias the shared FRAME_MARKER_CFG.
+    cfg = base_cfg.copy()
+    cfg.prim_path = prim_path
+    cfg.markers = {"frame": cfg.markers["frame"]}
+    cfg.markers["frame"].scale = (scale, scale, scale)
+    return cfg
 
 
 def _sphere_marker_cfg(prim_path: str, radius: float, color: tuple[float, float, float]) -> VisualizationMarkersCfg:

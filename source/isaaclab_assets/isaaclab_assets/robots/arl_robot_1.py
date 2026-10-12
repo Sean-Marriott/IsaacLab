@@ -296,13 +296,27 @@ MATRICE_PRUNER_CFG = MultirotorCfg(
 # Hover thrust per motor = 9.109 * 9.81 / 4 = 22.34 N, so with k_f = 3.35e-3 N/rps^2 the hover
 # speed is sqrt(22.34 / 3.35e-3) = 81.66 rps.
 #
-# The tube is authored horizontal, so the hinge angles at rest are far from zero. The defaults below
-# are where the payload settles hanging below a level, stationary airframe (measured in PhysX).
+# The payload joints are zeroed at the hanging rest pose: with all of them at zero the payload hangs
+# at rest below a level, stationary airframe, so the default joint positions are all zero. The tube
+# is authored horizontal in the meshes, so the joint frames in the USD carry the offset instead
+# (csTubePitch by 1.569360 rad, root_joint by -1.660847 rad, measured in PhysX; csTubeRoll already
+# rests at zero). The authored body poses therefore sit at csTubePitch = -1.569 rad, on its lower
+# limit, until the first reset writes the defaults.
+#
+# The payload dynamics in the USD are identified from motion capture of the real payload (the saw head
+# swinging with the mast clamped, without and with its springs, and a free hang-and-release of the
+# whole payload), not taken from CAD:
+#   roll_link (saw) COM: saw-head COM 55 mm below ``root_joint`` (CAD 89 mm); masses unchanged.
+#   roll_link inertia: CAD tensor x8.03, 0.133 kg m^2 about ``root_joint`` for the whole head.
+#   ``csTubePitch`` damping 0.1 N m s/rad; ``csTubeRoll`` at the CAD roll/pitch ratio (never excited).
+#   ``root_joint``: springs 0.0105 N m/rad, dry friction 0.03 N m (static and dynamic), no damping.
+#   ``roll_axis_center`` and ``feed_arm_pitch_center`` held at zero by stiff drives, as on the saw.
+# The CAD values are in the USD's git history. The chainsaw task re-applies the springs and friction
+# from its config (``ROOT_JOINT_SPRING_STIFFNESS``, ``ROOT_JOINT_FRICTION``) to randomize them.
 MATRICE_MK3_CFG = MATRICE_CFG.replace(
     spawn=MATRICE_CFG.spawn.replace(usd_path=_M350_CHAINSAW_MK3_USD_PATH),
     init_state=MATRICE_CFG.init_state.replace(
         rps={"rotor2": 81.66, "rotor0": 81.66, "rotor3": 81.66, "rotor1": 81.66},
-        joint_pos={"csTubePitch": 1.5624, "csTubeRoll": 0.0099, "root_joint": -1.6617},
     ),
     actuators={"thrusters": MATRICE_THRUSTER.replace(thruster_names_expr=["rotor2", "rotor0", "rotor3", "rotor1"])},
 )

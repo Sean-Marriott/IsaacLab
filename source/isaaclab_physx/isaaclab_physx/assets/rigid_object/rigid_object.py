@@ -687,7 +687,7 @@ class RigidObject(BaseRigidObject):
 
         # Set into simulation, note that when updating "model" properties with PhysX we need to do it on CPU.
         cpu_env_ids = self._get_cpu_env_ids(env_ids)
-        wp.copy(self._cpu_body_mass, self.data._body_mass)
+        self._copy_to_cpu(self._cpu_body_mass, self.data._body_mass)
         self.root_view.set_masses(self._cpu_body_mass, indices=cpu_env_ids)
 
     def set_masses_mask(
@@ -771,7 +771,7 @@ class RigidObject(BaseRigidObject):
         )
         # Set into simulation, note that when updating "model" properties with PhysX we need to do it on CPU.
         cpu_env_ids = self._get_cpu_env_ids(env_ids)
-        wp.copy(self._cpu_body_coms, self.data._body_com_pose_b.data)
+        self._copy_to_cpu(self._cpu_body_coms, self.data._body_com_pose_b.data)
         self.root_view.set_coms(self._cpu_body_coms, indices=cpu_env_ids)
 
     def set_coms_mask(
@@ -855,7 +855,7 @@ class RigidObject(BaseRigidObject):
         )
         # Set into simulation, note that when updating "model" properties with PhysX we need to do it on CPU.
         cpu_env_ids = self._get_cpu_env_ids(env_ids)
-        wp.copy(self._cpu_body_inertia, self.data._body_inertia)
+        self._copy_to_cpu(self._cpu_body_inertia, self.data._body_inertia)
         self.root_view.set_inertias(self._cpu_body_inertia.flatten(), indices=cpu_env_ids)
 
     def set_inertias_mask(
@@ -987,7 +987,7 @@ class RigidObject(BaseRigidObject):
         # Pinned memory enables DMA fast path and avoids per-call malloc.
         N, B = self.num_instances, self.num_bodies
         self._cpu_env_ids_all = wp.zeros(N, dtype=wp.int32, device="cpu", pinned=True)
-        wp.copy(self._cpu_env_ids_all, self._ALL_INDICES)
+        self._copy_to_cpu(self._cpu_env_ids_all, self._ALL_INDICES)
         self._cpu_body_mass = wp.zeros((N, B), dtype=wp.float32, device="cpu", pinned=True)
         self._cpu_body_coms = wp.zeros((N, B, 7), dtype=wp.float32, device="cpu", pinned=True)
         self._cpu_body_inertia = wp.zeros((N, B, 9), dtype=wp.float32, device="cpu", pinned=True)
@@ -1037,6 +1037,20 @@ class RigidObject(BaseRigidObject):
         else:
             body_ids = self._ALL_BODY_INDICES
         return body_ids
+
+    def _copy_to_cpu(self, dst: wp.array, src: wp.array) -> None:
+        """Copy device data into a pinned CPU buffer and wait for the copy to finish.
+
+        A device-to-pinned-host :func:`warp.copy` is asynchronous, so a PhysX TensorAPI call that reads
+        :paramref:`dst` straight after it may see stale data. Waiting here keeps every "model" property
+        write (stiffness, damping, masses, ...) from silently sending the previous buffer contents.
+
+        Args:
+            dst: Pinned CPU destination buffer.
+            src: Source array on the simulation device.
+        """
+        wp.copy(dst, src)
+        wp.synchronize_device(self.device)
 
     def _get_cpu_env_ids(self, env_ids: wp.array | torch.Tensor) -> wp.array:
         """Get CPU environment indices. Uses pre-allocated pinned buffer for full-index case.

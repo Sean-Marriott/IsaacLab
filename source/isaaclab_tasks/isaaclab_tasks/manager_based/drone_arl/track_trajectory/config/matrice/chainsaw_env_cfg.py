@@ -24,6 +24,11 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
 
 import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
+from isaaclab_tasks.manager_based.drone_arl.mdp.events import (
+    RandomizePassiveJointDamping,
+    set_passive_joint_friction,
+    set_passive_joint_stiffness,
+)
 from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
     ToolEndTargetExp,
     distance_to_goal_exp,
@@ -39,6 +44,31 @@ from .track_trajectory_env_cfg import _MEASUREMENT_DELAY, COMMAND_NAME, EventCfg
 CHAINSAW_JOINT_NAMES = ["csTubePitch", "csTubeRoll", "root_joint"]
 """Passive payload joints: the tube hinge at the airframe and the saw-head pitch at the tube end."""
 
+ROOT_JOINT_SPRING_STIFFNESS = 0.0105
+"""Stiffness of the springs added on ``root_joint`` to help hold the saw head at its rest pitch [N·m/rad].
+
+The saw head COM sits below ``root_joint``, so gravity is the main restoring torque (about 1.05 N·m/rad,
+set by the mass properties in the USD). The springs add about 1% to that: with the mast clamped, the
+saw head swung with nearly the same period with and without them once the larger release angle of the
+spring take is allowed for. The value comes from a sim fit to three motion-capture takes (mast clamped
+without and with springs, and the free hang-and-release).
+
+The same value is authored in ``M350-chainsaw-mk3.usd``; this task writes it again at startup so it can
+be randomized. Set it to 0.0 to model the saw without the springs.
+"""
+
+ROOT_JOINT_FRICTION = 0.03
+"""Dry friction on ``root_joint``: the PhysX static and dynamic joint friction effort [N·m].
+
+With the mast clamped, the real saw head lost about 4 deg of swing per half cycle whatever its
+amplitude, the signature of dry friction, and the swing with and without springs could not both be
+matched by viscous damping. This value, with no viscous damping on the hinge, reproduces every peak of
+both clamped takes to within about 2 deg in this simulation.
+
+The same value is authored in ``M350-chainsaw-mk3.usd``; this task writes it again at startup so it can
+be randomized. Set it to 0.0 to remove it.
+"""
+
 AIRFRAME_BODY_NAME = "body"
 """Airframe body of the Mk3 USD. Its ``base_link`` is the saw-head mount, not the airframe."""
 
@@ -53,8 +83,8 @@ END_HOLD_S = 3.0
 CHAINSAW_MOUTH_OFFSET = (-0.03, 0.365, 0.04)
 # The mouth relative to the airframe ``body`` when the payload hangs at rest below a level,
 # stationary airframe, in the yaw-aligned vehicle frame. Measured in PhysX with MATRICE_MK3_CFG at
-# its default joint angles; re-measure if the USD or those defaults change.
-CHAINSAW_HANG_OFFSET = (0.3783, 0.0123, -1.2302)
+# its default joint angles, which are its hanging rest pose; re-measure if the USD or those change.
+CHAINSAW_HANG_OFFSET = (0.3704, 0.0017, -1.2331)
 
 
 @configclass
@@ -86,7 +116,58 @@ class ChainsawObservationsCfg(ObservationsCfg):
 
 @configclass
 class ChainsawEventCfg(EventCfg):
-    """Configuration for events, with the chainsaw joint state randomized about rest on reset."""
+    """Configuration for events, with the chainsaw dynamics randomized and its joints reset about rest."""
+
+    # The tube-hinge damping is identified from one free hang-and-release take, and it sets how fast a
+    # swing dies out, so the policy should not rely on one exact decay rate. In the USD it is authored
+    # as a zero-stiffness drive, not joint friction, hence the custom term. The saw-head hinge has no
+    # viscous damping (its losses are dry friction, below), so this leaves it at zero.
+    randomize_chainsaw_damping = EventTerm(
+        func=RandomizePassiveJointDamping,  # type: ignore[arg-type]
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=CHAINSAW_JOINT_NAMES),
+            "scale_range": (0.5, 2.0),
+        },
+    )
+
+    # The springs on ``root_joint``. They are a small part of the restoring torque and their rate is
+    # only roughly identified, so it is randomized widely about the identified value.
+    chainsaw_springs = EventTerm(
+        func=set_passive_joint_stiffness,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["root_joint"]),
+            "stiffness": ROOT_JOINT_SPRING_STIFFNESS,
+            "scale_range": (0.5, 2.0),
+        },
+    )
+
+    # Dry friction on the saw-head hinge, which dominates its losses on the rig. Identified from two
+    # clamped takes, so randomized moderately about the identified value.
+    chainsaw_hinge_friction = EventTerm(
+        func=set_passive_joint_friction,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["root_joint"]),
+            "friction": ROOT_JOINT_FRICTION,
+            "scale_range": (0.7, 1.4),
+        },
+    )
+
+    # The saw is ~1.9 kg of a ~2 kg payload and its mass varies with fuel, chain and battery. Only its
+    # mass is randomized, not its COM: the COM offset below ``root_joint`` sets the saw-head pendulum
+    # and the hanging mouth position in CHAINSAW_HANG_OFFSET, both identified for the nominal COM.
+    randomize_chainsaw_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["roll_link"]),
+            "mass_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "recompute_inertia": True,
+        },
+    )
 
     reset_chainsaw_joints = EventTerm(
         func=mdp.reset_joints_by_offset,
