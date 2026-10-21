@@ -127,8 +127,8 @@ class ActionsCfg:
         # The hardest reference tops out at 2.25 m/s and needs 0.75 m/s of standing tracking error
         # to sustain its 3.0 m/s^2 peak acceleration, which is exactly this budget. Keeping it no
         # larger than necessary matters: this constant sets the action resolution, scales the
-        # exploration noise, and has to be reproduced exactly on the vehicle. Raising it means
-        # scaling the trajectory ranges to match -- see the class docstring above.
+        # exploration noise, and has to be reproduced exactly on the vehicle. Change it with
+        # set_speed_envelope() rather than here, so the trajectory ranges are scaled to match.
         max_velocity=3.0,
         max_yaw_rate=math.pi / 2.0,  # 90 deg/s: nulls a worst-case pi yaw error in 2 s
     )
@@ -376,6 +376,39 @@ def ramp_trajectory_difficulty(
     if abs(new_value - data) < 1e-4:
         return mdp.modify_term_cfg.NO_CHANGE
     return new_value
+
+
+def set_speed_envelope(env_cfg: "TrackTrajectoryEnvCfg", max_velocity: float):
+    """Set the velocity action range and scale the trajectory ranges to match.
+
+    The ranges are sized so that the hardest reference needs exactly the action range: its peak
+    speed plus the standing velocity error that sustains its peak acceleration. Scaling every range
+    by the same factor as :paramref:`max_velocity` keeps that balance. ``omega_max`` is left alone,
+    so the paths keep their shape and timescale and only change size; position, speed and
+    acceleration then all scale linearly.
+
+    The factor is taken relative to the current ``max_velocity``, so this can be called on any
+    config in the hierarchy, and more than once. Call it at the end of ``__post_init__``, after any
+    replacement of the ranges.
+
+    Not scaled, deliberately: the gust and drag (properties of the weather, not of the envelope),
+    and the policy's ``init_noise_std`` (in normalized action units, so it already scales). Not
+    scaled, but coupled loosely: the position reward widths, the observation clips and the
+    tracking-divergence threshold, which may want revisiting after a large change.
+
+    Args:
+        env_cfg: The environment configuration to modify in place.
+        max_velocity: New per-axis velocity action limit [m/s].
+    """
+    action = env_cfg.actions.velocity_command
+    factor = max_velocity / action.max_velocity
+    action.max_velocity = max_velocity
+
+    command = env_cfg.commands.trajectory
+    ranges = command.ranges
+    scaled = ("vel_rms_target", "pos_cap", "vel_cap", "acc_cap", "pos_z_cap", "vel_z_cap", "acc_z_cap")
+    # Build a new Ranges rather than mutating in place: it may be a shared module-level instance.
+    command.ranges = ranges.replace(**{name: tuple(v * factor for v in getattr(ranges, name)) for name in scaled})
 
 
 @configclass
