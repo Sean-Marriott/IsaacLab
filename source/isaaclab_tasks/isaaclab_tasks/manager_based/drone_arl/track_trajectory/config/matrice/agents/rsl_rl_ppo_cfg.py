@@ -51,3 +51,19 @@ class TrackTrajectoryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class ChainsawToolPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
+    """PPO configuration for the chainsaw tool-tracking task, with a stronger entropy bonus.
+
+    At 0.002 the action noise kept collapsing after the difficulty ramp ended: the summed entropy fell
+    to about -21.5 by iteration 1200 (a std near 0.001, in normalized units) and was still falling,
+    while the tool position error rose from 6.5 to 7.7 cm at the end of the hold. The swing task, with
+    the same coefficient, levelled off near -15 with a flat error. rsl_rl has no lower bound on the
+    std, so the bonus is raised instead.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.entropy_coef = 0.005
