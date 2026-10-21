@@ -655,11 +655,20 @@ class ToolEndTargetExp(ManagerTermBase):
     from the tool point to the target, and is zero except during the last ``window_s`` seconds of
     the episode.
 
-    When the simulation is rendering and ``debug_vis`` is set, the tool point (orange) and its
-    target (cyan) are drawn as spheres on every rendered frame, so their alignment can be inspected
-    over the whole episode.
+    With ``std_yaw`` set, the tool yaw has to match the end yaw as well, through a joint kernel:
+
+    ``exp(-|p_err|^2 / std^2 - yaw_err^2 / std_yaw^2)``
+
+    Only the yaw is compared, not the full orientation: the tilt of a hanging tool is set by gravity
+    and the swing, so the vehicle cannot hold it, whereas the yaw follows the vehicle heading.
 
     The ``params`` of the term configuration are:
+
+    When the simulation is rendering and ``debug_vis`` is set, the tool and its target are drawn on
+    every rendered frame, so their alignment can be inspected over the whole episode. Without
+    ``tool_rot`` they are drawn as spheres, the tool point orange and the target cyan. With it they
+    are drawn as coordinate frames (x red, y green, z blue): the larger frame is the target, at the
+    end yaw, and the smaller one the tool.
 
     * ``asset_cfg``: SceneEntityCfg identifying the tool body. Must have ``body_names`` configured.
     * ``std``: Standard deviation used in the exponential kernel [m].
@@ -667,8 +676,14 @@ class ToolEndTargetExp(ManagerTermBase):
     * ``tool_offset``: Tool point in the tool body frame [m].
     * ``hang_offset``: Tool point relative to the tracked body when the payload hangs at rest below a
       level vehicle, in the yaw-aligned vehicle frame [m].
+    * ``tool_rot``: Orientation of the tool frame in the tool body frame, as a quaternion
+      (x, y, z, w), chosen so that the tool frame lines up with the vehicle yaw frame at rest. It
+      sets the tool yaw compared by ``std_yaw`` and draws the markers as frames. Defaults to None
+      (spheres).
+    * ``std_yaw``: Standard deviation of the kernel on the tool yaw error [rad]. Requires
+      ``tool_rot``. Defaults to None, which rewards the position only.
     * ``command_name``: Name of the :class:`DroneTrajectoryCommand` to read the end pose from.
-    * ``debug_vis``: Whether to draw the tool point and target markers. Defaults to True.
+    * ``debug_vis``: Whether to draw the tool and target markers. Defaults to True.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -683,6 +698,12 @@ class ToolEndTargetExp(ManagerTermBase):
         hang_offset = torch.tensor(cfg.params["hang_offset"], device=env.device)
         self._tool_b = tool_offset.expand(env.num_envs, 3)
         self._target_v = hang_offset.expand(env.num_envs, 3)
+        tool_rot = cfg.params.get("tool_rot")
+        self._tool_rot_b = (
+            None if tool_rot is None else torch.tensor(tool_rot, device=env.device).expand(env.num_envs, 4)
+        )
+        if cfg.params.get("std_yaw") is not None and tool_rot is None:
+            raise ValueError("ToolEndTargetExp: 'std_yaw' needs 'tool_rot' to define the tool yaw.")
 
         self._tool_visualizer = None
         self._target_visualizer = None
@@ -692,12 +713,19 @@ class ToolEndTargetExp(ManagerTermBase):
             # by task configs that are parsed before the simulation app is launched.
             from isaaclab.markers import VisualizationMarkers
 
-            self._tool_visualizer = VisualizationMarkers(
-                _sphere_marker_cfg("/Visuals/Reward/tool_point", radius=0.02, color=(1.0, 0.35, 0.0))
-            )
-            self._target_visualizer = VisualizationMarkers(
-                _sphere_marker_cfg("/Visuals/Reward/tool_target", radius=0.02, color=(0.0, 0.9, 0.9))
-            )
+            if self._tool_rot_b is None:
+                tool_marker_cfg = _sphere_marker_cfg("/Visuals/Reward/tool_point", radius=0.02, color=(1.0, 0.35, 0.0))
+                target_marker_cfg = _sphere_marker_cfg(
+                    "/Visuals/Reward/tool_target", radius=0.02, color=(0.0, 0.9, 0.9)
+                )
+            else:
+                from isaaclab.markers.config import FRAME_MARKER_CFG
+
+                # Same sizes as the DroneEndPoseExp frames.
+                tool_marker_cfg = _frame_marker_cfg(FRAME_MARKER_CFG, "/Visuals/Reward/tool_pose", scale=0.3)
+                target_marker_cfg = _frame_marker_cfg(FRAME_MARKER_CFG, "/Visuals/Reward/tool_target_pose", scale=0.6)
+            self._tool_visualizer = VisualizationMarkers(tool_marker_cfg)
+            self._target_visualizer = VisualizationMarkers(target_marker_cfg)
             # Drawn from the post-update event, like the command debug markers, rather than from
             # :meth:`__call__`: rewards are computed after the step has been rendered, so markers set
             # there would trail the drawn robot by a full policy step.
@@ -714,26 +742,38 @@ class ToolEndTargetExp(ManagerTermBase):
             self._debug_vis_handle.unsubscribe()
             self._debug_vis_handle = None
 
-    def _tool_and_target(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tool point and its end target [m], in the environment-local world frame, shape (num_envs, 3) each."""
+    def _tool_and_target(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Tool pose and its end target pose, in the environment-local world frame.
+
+        Returns:
+            A tuple ``(tool_pos, tool_quat, target_pos, target_quat)``. Positions are in [m], shape
+            (num_envs, 3); orientations are quaternions (x, y, z, w), shape (num_envs, 4). The tool
+            orientation is that of the tool body, rotated by ``tool_rot`` when it is set; the target
+            orientation is the end yaw.
+        """
         body_pos = self._asset.data.body_pos_w.torch[:, self._body_id] - self._env.scene.env_origins
         body_quat = self._asset.data.body_quat_w.torch[:, self._body_id]
         tool_pos = body_pos + math_utils.quat_apply(body_quat, self._tool_b)
+        tool_quat = body_quat if self._tool_rot_b is None else math_utils.quat_mul(body_quat, self._tool_rot_b)
 
         cmd = self._command_term
         zeros = torch.zeros_like(cmd.yaw_end)
         end_yaw_quat = math_utils.quat_from_euler_xyz(zeros, zeros, cmd.yaw_end)
         target = cmd.pos_end_w + math_utils.quat_apply(end_yaw_quat, self._target_v)
-        return tool_pos, target
+        return tool_pos, tool_quat, target, end_yaw_quat
 
     def _debug_vis_callback(self, event):
         # note: needed in case the robot is de-initialized, since its data cannot be accessed then
         if not self._asset.is_initialized:
             return
-        tool_pos, target = self._tool_and_target()
+        tool_pos, tool_quat, target, target_quat = self._tool_and_target()
         origins = self._env.scene.env_origins
-        self._tool_visualizer.visualize(tool_pos + origins)
-        self._target_visualizer.visualize(target + origins)
+        if self._tool_rot_b is None:
+            self._tool_visualizer.visualize(tool_pos + origins)
+            self._target_visualizer.visualize(target + origins)
+        else:
+            self._tool_visualizer.visualize(tool_pos + origins, tool_quat)
+            self._target_visualizer.visualize(target + origins, target_quat)
 
     def __call__(
         self,
@@ -743,6 +783,8 @@ class ToolEndTargetExp(ManagerTermBase):
         window_s: float,
         tool_offset: tuple[float, float, float],
         hang_offset: tuple[float, float, float],
+        tool_rot: tuple[float, float, float, float] | None = None,
+        std_yaw: float | None = None,
         command_name: str = "trajectory",
         debug_vis: bool = True,
     ) -> torch.Tensor:
@@ -751,11 +793,15 @@ class ToolEndTargetExp(ManagerTermBase):
         Returns:
             A 1-D tensor of shape (num_envs,) with values in [0, 1].
         """
-        tool_pos, target = self._tool_and_target()
+        tool_pos, tool_quat, target, _ = self._tool_and_target()
         cmd = self._command_term
-        error_square = torch.sum(torch.square(tool_pos - target), dim=1)
+        exponent = torch.sum(torch.square(tool_pos - target), dim=1) / std**2
+        if std_yaw is not None:
+            _, _, tool_yaw = math_utils.euler_xyz_from_quat(tool_quat)
+            yaw_error = math_utils.wrap_to_pi(tool_yaw - cmd.yaw_end)
+            exponent = exponent + torch.square(yaw_error) / std_yaw**2
         active = cmd.ref_time >= cmd.episode_length_s - window_s
-        return torch.exp(-error_square / std**2) * active
+        return torch.exp(-exponent) * active
 
 
 class DroneEndPoseExp(ManagerTermBase):
