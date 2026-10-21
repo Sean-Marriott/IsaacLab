@@ -537,7 +537,14 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
     amplitude: on a payload with ``m * g * L`` of about 22.4 J (the Mk3 chainsaw), an ``energy_scale`` of 0.3 J falls to
     ``1/e`` at a swing of roughly 9.5 deg.
 
-    Takes the same ``params`` as :class:`PayloadSwingEnergy`, plus ``energy_scale`` [J].
+    Takes the same ``params`` as :class:`PayloadSwingEnergy`, plus:
+
+    * ``energy_scale``: Swing energy at which the kernel falls to ``1/e`` [J].
+    * ``window_s``: If given, the reward is zero except during the last ``window_s`` seconds of the
+      trajectory reference, as in :class:`ToolEndTargetExp` [s]. If ``None``, the default, it is
+      active over the whole episode.
+    * ``command_name``: Name of the trajectory command term whose clock sets the window. Only used
+      when ``window_s`` is given.
     """
 
     def __call__(
@@ -546,6 +553,8 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
         payload_cfg: SceneEntityCfg,
         pivot_cfg: SceneEntityCfg,
         energy_scale: float = 0.3,
+        window_s: float | None = None,
+        command_name: str = "trajectory",
     ) -> torch.Tensor:
         """Compute the reward.
 
@@ -553,7 +562,11 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
             A 1-D tensor of shape (num_envs,) with values in [0, 1].
         """
         energy = super().__call__(env, payload_cfg, pivot_cfg)
-        return torch.exp(-energy / energy_scale)
+        reward = torch.exp(-energy / energy_scale)
+        if window_s is not None:
+            cmd = env.command_manager.get_term(command_name)
+            reward = reward * (cmd.ref_time >= cmd.episode_length_s - window_s)
+        return reward
 
 
 """
