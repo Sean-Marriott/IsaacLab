@@ -216,6 +216,11 @@ class MatriceChainsawSwingEnvCfg(MatriceChainsawTrajectoryEnvCfg):
         # To follow a trajectory again, comment out this whole block.
         self.commands.trajectory.ranges = STATIONARY_REFERENCE
         self.curriculum.trajectory_difficulty = None
+        # TODO: Drop lookahead_v (``self.observations.policy.lookahead_v = None``). With the reference
+        # held still, every look-ahead point is the target, so the term is pos_error_v repeated five
+        # times, but without its noise and delay: the policy can read a clean position error from it
+        # and bypass the corruption on pos_error_v. Dropping it changes the observation size (43 -> 28),
+        # so checkpoints from the trajectory task no longer load.
 
         # Spawn ranges of track_position_direct_vel, relative to the target pose. The yaw covers every
         # heading, so lining up can mean turning round.
@@ -266,3 +271,21 @@ class MatriceChainsawSwingEnvCfg_PLAY(MatriceChainsawSwingEnvCfg):
         # Keep the kicks, since they are what this task is evaluated on, but on a fixed beat so
         # every environment shows the same disturbance-and-recovery pattern.
         self.events.kick_chainsaw_swing.interval_range_s = (5.0, 5.0)
+        # Spawn the payload hanging at rest, so any swing seen comes from the flight or the kicks.
+        for term in (self.events.reset_chainsaw_swing_pitch, self.events.reset_chainsaw_swing_roll):
+            term.params["position_range"] = (0.0, 0.0)
+            term.params["velocity_range"] = (0.0, 0.0)
+        # Spawn the drone at rest too, so its initial motion doesn't start the payload swinging.
+        self.events.reset_base.params["vel_noise"] = (0.0, 0.0)
+        self.events.reset_base.params["angvel_noise"] = (0.0, 0.0)
+
+        # -- saw head locked at its rest pitch
+        # Holds ``root_joint`` at zero (the hanging rest pose) with a stiff drive, in place of the
+        # 0.0105 N·m/rad springs, so the payload swings as one rigid pendulum about the tube hinge.
+        # Gravity and swing loads on the head are ~1 N·m, so 1e4 N·m/rad keeps it within ~0.1 mrad.
+        # The joint stays in the observation and reads ~0, so trained checkpoints still load.
+        # To let the saw head swing freely again, comment out this block.
+        self.events.chainsaw_springs.params["stiffness"] = 1.0e4
+        self.events.chainsaw_springs.params["scale_range"] = (1.0, 1.0)
+        self.events.reset_chainsaw_joints.params["position_range"] = (0.0, 0.0)
+        self.events.reset_chainsaw_joints.params["velocity_range"] = (0.0, 0.0)
