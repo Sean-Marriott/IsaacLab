@@ -561,63 +561,75 @@ Trajectory tracking rewards.
 """
 
 
-def velocity_tracking_exp(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    std: float = 1.0,
-    command_name: str = "trajectory",
-) -> torch.Tensor:
+def position_tracking_exp(env: ManagerBasedRLEnv, std: float = 1.0, command_name: str = "trajectory") -> torch.Tensor:
+    """Reward matching the reference position using an exponential kernel.
+
+    Unlike :func:`distance_to_goal_exp`, which compares a named body with any position command,
+    this compares the frame tracked by a :class:`DroneTrajectoryCommand` (see its
+    ``tracked_frame_state``), so it follows a tool frame when the command tracks one.
+
+    Args:
+        env: The manager-based RL environment instance.
+        std: Standard deviation used in the exponential kernel [m]; larger values produce a
+            gentler falloff.
+        command_name: Name of the trajectory command to read the reference position from.
+
+    Returns:
+        A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates an exact match.
+    """
+    command_term = env.command_manager.get_term(command_name)
+    pos_w, _, _ = command_term.tracked_frame_state()
+
+    position_error_square = torch.sum(torch.square(command_term.command[:, :3] - pos_w), dim=1)
+    return torch.exp(-position_error_square / std**2)
+
+
+def velocity_tracking_exp(env: ManagerBasedRLEnv, std: float = 1.0, command_name: str = "trajectory") -> torch.Tensor:
     """Reward matching the reference velocity using an exponential kernel.
 
     Position tracking alone is not enough on a closed reference path: sitting near the centroid and
     letting the reference orbit around keeps the mean position error small. Rewarding the reference
     velocity makes that solution strictly worse, so the drone actually flies the path.
 
+    The velocity is that of the frame tracked by the :class:`DroneTrajectoryCommand`.
+
     Args:
         env: The manager-based RL environment instance.
-        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
         std: Standard deviation used in the exponential kernel [m/s]; larger values produce a
             gentler falloff.
-        command_name: Name of the trajectory command to read the reference velocity from. The
-            function expects the reference velocity in columns 3 to 6 of the command tensor.
+        command_name: Name of the trajectory command to read the reference velocity from.
 
     Returns:
         A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates an exact match.
     """
-    asset: RigidObject = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
+    command_term = env.command_manager.get_term(command_name)
+    _, _, lin_vel_w = command_term.tracked_frame_state()
 
-    velocity_error_square = torch.sum(torch.square(command[:, 3:6] - asset.data.root_lin_vel_w.torch), dim=1)
+    velocity_error_square = torch.sum(torch.square(command_term.command[:, 3:6] - lin_vel_w), dim=1)
     return torch.exp(-velocity_error_square / std**2)
 
 
-def yaw_tracking_exp(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    std: float = 0.5,
-    command_name: str = "trajectory",
-) -> torch.Tensor:
-    """Reward alignment of the vehicle yaw with a commanded yaw using an exponential kernel.
+def yaw_tracking_exp(env: ManagerBasedRLEnv, std: float = 0.5, command_name: str = "trajectory") -> torch.Tensor:
+    """Reward alignment of the tracked yaw with the reference yaw using an exponential kernel.
 
-    This differs from :func:`yaw_aligned`, which always targets a yaw of zero.
+    The yaw is that of the frame tracked by the :class:`DroneTrajectoryCommand`. This differs from
+    :func:`yaw_aligned`, which always targets a yaw of zero.
 
     Args:
         env: The manager-based RL environment instance.
-        asset_cfg: SceneEntityCfg identifying the asset (defaults to "robot").
         std: Standard deviation used in the exponential kernel [rad]; smaller values make the
             reward more sensitive to yaw deviations.
-        command_name: Name of the trajectory command to read the reference yaw from. The function
-            expects the reference yaw in column 9 of the command tensor.
+        command_name: Name of the trajectory command to read the reference yaw from.
 
     Returns:
         A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates perfect
         alignment.
     """
-    asset: RigidObject = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
+    command_term = env.command_manager.get_term(command_name)
+    _, quat_w, _ = command_term.tracked_frame_state()
 
-    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w.torch)
-    yaw_error = math_utils.wrap_to_pi(command[:, 9] - yaw)
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    yaw_error = math_utils.wrap_to_pi(command_term.command[:, 9] - yaw)
     return torch.exp(-(yaw_error**2) / std**2)
 
 

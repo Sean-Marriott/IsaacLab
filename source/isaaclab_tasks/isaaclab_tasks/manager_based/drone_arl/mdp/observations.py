@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
     from isaaclab_contrib.assets import Multirotor
 
+    from .commands import DroneTrajectoryCommand
+
 from isaaclab.envs.utils.io_descriptors import generic_io_descriptor, record_shape
 
 from isaaclab_tasks import ISAACLAB_TASKS_EXT_DIR
@@ -405,6 +407,11 @@ action: it builds its setpoint frame from yaw alone. Using the full body frame w
 pitch into the observation-to-action mapping and force the network to undo a rotation it does not
 command. Roll and pitch still reach the policy through :func:`base_roll_pitch` and the body-frame
 linear and angular velocities.
+
+The errors are taken against the frame the command tracks (see
+:meth:`~isaaclab_tasks.manager_based.drone_arl.mdp.commands.DroneTrajectoryCommand.tracked_frame_state`),
+which is the vehicle unless the command is set to track a payload frame such as a tool tip. They are
+still expressed in the vehicle frame, since that is the frame the action is in.
 """
 
 
@@ -425,12 +432,13 @@ def trajectory_position_error_v(
         asset_cfg: SceneEntityCfg identifying the asset.
 
     Returns:
-        The reference position minus the current position [m], expressed in the yaw-only vehicle
-        frame. Shape is (num_envs, 3).
+        The reference position minus the position of the tracked frame [m], expressed in the
+        yaw-only vehicle frame. Shape is (num_envs, 3).
     """
     asset: Multirotor = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    error_w = command[:, :3] - (asset.data.root_pos_w.torch - env.scene.env_origins)
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    pos_w, _, _ = command_term.tracked_frame_state()
+    error_w = command_term.command[:, :3] - pos_w
     return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
 
 
@@ -446,12 +454,13 @@ def trajectory_velocity_error_v(
         asset_cfg: SceneEntityCfg identifying the asset.
 
     Returns:
-        The reference velocity minus the current velocity [m/s], expressed in the yaw-only vehicle
-        frame. Shape is (num_envs, 3).
+        The reference velocity minus the velocity of the tracked frame [m/s], expressed in the
+        yaw-only vehicle frame. Shape is (num_envs, 3).
     """
     asset: Multirotor = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    error_w = command[:, 3:6] - asset.data.root_lin_vel_w.torch
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    _, _, lin_vel_w = command_term.tracked_frame_state()
+    error_w = command_term.command[:, 3:6] - lin_vel_w
     return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
 
 
@@ -502,7 +511,7 @@ def trajectory_ref_accel_v(
 def trajectory_yaw_error(
     env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
-    """Yaw error to the reference, wrapped to (-pi, pi].
+    """Yaw error of the tracked frame to the reference, wrapped to (-pi, pi].
 
     The Lee velocity controller commands yaw *rate* and never closes a loop on yaw angle, so the
     policy has to close it and therefore needs this term.
@@ -510,15 +519,15 @@ def trajectory_yaw_error(
     Args:
         env: The manager-based RL environment instance.
         command_name: Name of the trajectory command term to read the reference from.
-        asset_cfg: SceneEntityCfg identifying the asset.
+        asset_cfg: SceneEntityCfg identifying the asset. Unused: the yaw is that of the tracked frame.
 
     Returns:
         The wrapped yaw error [rad]. Shape is (num_envs, 1).
     """
-    asset: Multirotor = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w.torch)
-    return math_utils.wrap_to_pi(command[:, 9] - yaw).unsqueeze(-1)
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    _, quat_w, _ = command_term.tracked_frame_state()
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    return math_utils.wrap_to_pi(command_term.command[:, 9] - yaw).unsqueeze(-1)
 
 
 @generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
@@ -541,9 +550,9 @@ def trajectory_lookahead_v(
 ) -> torch.Tensor:
     """Future reference positions relative to the current one, in the vehicle frame.
 
-    Each look-ahead point is reported as an offset from the *current* position rather than as an
-    absolute one, so the observation stays bounded and centred on zero regardless of where in the
-    environment the drone is.
+    Each look-ahead point is reported as an offset from the *current* position of the tracked frame
+    rather than as an absolute one, so the observation stays bounded and centred on zero regardless
+    of where in the environment the drone is.
 
     Args:
         env: The manager-based RL environment instance.
@@ -555,8 +564,8 @@ def trajectory_lookahead_v(
         Shape is (num_envs, 3 * num_lookahead).
     """
     asset: Multirotor = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    position_w = asset.data.root_pos_w.torch - env.scene.env_origins
-    lookahead_w = command[:, 11:].reshape(env.num_envs, -1, 3) - position_w.unsqueeze(1)
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    position_w, _, _ = command_term.tracked_frame_state()
+    lookahead_w = command_term.command[:, 11:].reshape(env.num_envs, -1, 3) - position_w.unsqueeze(1)
     vehicle_quat = _vehicle_frame_quat(asset).unsqueeze(1).expand(-1, lookahead_w.shape[1], -1)
     return math_utils.quat_apply_inverse(vehicle_quat, lookahead_w).flatten(start_dim=1)

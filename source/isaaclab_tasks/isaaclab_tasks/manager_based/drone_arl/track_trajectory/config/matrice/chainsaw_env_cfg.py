@@ -207,16 +207,16 @@ class ChainsawRewardsCfg:
             "command_name": COMMAND_NAME,
         },
     )
-    # These two read the articulation root state, not a named body.
+    # These two read the frame the command tracks, which here is the airframe (the articulation root).
     vel_tracking = RewTerm(
         func=velocity_tracking_exp,
         weight=0.3,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.6, "command_name": COMMAND_NAME},
+        params={"std": 0.6, "command_name": COMMAND_NAME},
     )
     yaw_tracking = RewTerm(
         func=yaw_tracking_exp,
         weight=0.2,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.35, "command_name": COMMAND_NAME},
+        params={"std": 0.35, "command_name": COMMAND_NAME},
     )
 
     # -- regularization (same as the base config)

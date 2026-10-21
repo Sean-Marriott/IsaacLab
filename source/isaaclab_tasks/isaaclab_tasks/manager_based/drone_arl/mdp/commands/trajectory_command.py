@@ -394,6 +394,9 @@ class DroneTrajectoryCommand(CommandTerm):
         self.body_idx = self.robot.find_bodies(cfg.body_name)[0][0]
 
         num_envs, device = self.num_envs, self.device
+        if cfg.body_offset is not None:
+            self._offset_pos = torch.tensor(cfg.body_offset.pos, device=device).expand(num_envs, 3)
+            self._offset_rot = torch.tensor(cfg.body_offset.rot, device=device).expand(num_envs, 4)
         harmonics = cfg.num_harmonics
         self._lookahead_times = torch.tensor(cfg.lookahead_times_s, device=device)
         self.num_lookahead = len(cfg.lookahead_times_s)
@@ -476,6 +479,31 @@ class DroneTrajectoryCommand(CommandTerm):
     """
     Operations.
     """
+
+    def tracked_frame_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the state of the frame tracked against the reference.
+
+        This is the frame set by :attr:`DroneTrajectoryCommandCfg.body_offset`, or the vehicle when
+        no offset is set. Observations, rewards and terminations that compare the robot with the
+        reference read it from here, so they all track the same frame.
+
+        Returns:
+            A tuple ``(position, orientation, linear_velocity)``: the position [m] in the
+            environment-local world frame, the orientation as a world-frame quaternion (x, y, z, w),
+            and the linear velocity [m/s] of the frame origin in the world frame. Shapes are
+            ``(num_envs, 3)``, ``(num_envs, 4)`` and ``(num_envs, 3)``.
+        """
+        data = self.robot.data
+        if self.cfg.body_offset is None:
+            pos_w = data.body_pos_w.torch[:, self.body_idx] - self._env.scene.env_origins
+            return pos_w, data.root_quat_w.torch, data.root_lin_vel_w.torch
+
+        body_quat = data.body_link_quat_w.torch[:, self.body_idx]
+        offset_w = math_utils.quat_apply(body_quat, self._offset_pos)
+        pos_w = data.body_link_pos_w.torch[:, self.body_idx] + offset_w - self._env.scene.env_origins
+        ang_vel_w = data.body_link_ang_vel_w.torch[:, self.body_idx]
+        lin_vel_w = data.body_link_lin_vel_w.torch[:, self.body_idx] + torch.cross(ang_vel_w, offset_w, dim=-1)
+        return pos_w, math_utils.quat_mul(body_quat, self._offset_rot), lin_vel_w
 
     def sample_parameters(self, env_ids: Sequence[int] | torch.Tensor):
         """Draw a new trajectory for the given environments.
@@ -621,10 +649,10 @@ class DroneTrajectoryCommand(CommandTerm):
         self._time += self._env.step_dt
 
     def _update_metrics(self):
-        pos_w = self.robot.data.body_pos_w.torch[:, self.body_idx] - self._env.scene.env_origins
+        pos_w, quat_w, lin_vel_w = self.tracked_frame_state()
         position_error = torch.linalg.norm(self.pos_ref_w - pos_w, dim=-1)
-        velocity_error = torch.linalg.norm(self.vel_ref_w - self.robot.data.root_lin_vel_w.torch, dim=-1)
-        _, _, yaw = math_utils.euler_xyz_from_quat(self.robot.data.root_quat_w.torch)
+        velocity_error = torch.linalg.norm(self.vel_ref_w - lin_vel_w, dim=-1)
+        _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
         yaw_error = torch.abs(math_utils.wrap_to_pi(self.yaw_ref - yaw))
 
         self._error_sum += position_error
@@ -706,7 +734,7 @@ class DroneTrajectoryCommand(CommandTerm):
             n: Number of environments being visualized.
             origins: Environment origins of those environments [m], shape ``(n, 3)``.
         """
-        pos = self.robot.data.body_pos_w.torch[:, self.body_idx] - self._env.scene.env_origins
+        pos, _, _ = self.tracked_frame_state()
 
         # Age the latch once per environment step, not once per rendered frame.
         step = self._env.common_step_counter

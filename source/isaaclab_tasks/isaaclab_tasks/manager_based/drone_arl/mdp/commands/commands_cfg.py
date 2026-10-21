@@ -89,8 +89,30 @@ class DroneTrajectoryCommandCfg(CommandTermCfg):
     asset_name: str = MISSING
     """Name of the asset in the environment for which the command is generated."""
 
+    @configclass
+    class OffsetCfg:
+        """A frame fixed to :attr:`body_name`, given relative to the body's link frame."""
+
+        pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        """Position of the frame origin in the body frame [m]."""
+
+        rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+        """Orientation of the frame relative to the body frame, as a quaternion (x, y, z, w)."""
+
     body_name: str = MISSING
     """Name of the body in the asset whose position is tracked against the reference."""
+
+    body_offset: OffsetCfg | None = None
+    """Frame on :attr:`body_name` that is tracked against the reference. Defaults to None.
+
+    When set, the reference position, velocity and yaw are all tracked by this frame: the position
+    and velocity of its origin and the yaw of its orientation. Use it to track a point on a payload,
+    such as a tool tip, rather than the vehicle. Its rotation should make it line up with the vehicle
+    yaw frame when the payload is at rest, so that its yaw is the vehicle heading the tool implies.
+
+    When None, the position of :attr:`body_name` is tracked, with the velocity and yaw of the asset
+    root, which is the vehicle itself for a body on the airframe.
+    """
 
     difficulty: float = 1.0
     """Interpolation factor between the easy and hard end of every range in :attr:`ranges`."""

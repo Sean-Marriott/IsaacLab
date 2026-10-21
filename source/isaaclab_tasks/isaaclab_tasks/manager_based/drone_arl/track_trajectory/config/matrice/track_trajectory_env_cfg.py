@@ -306,12 +306,12 @@ class RewardsCfg:
     vel_tracking = RewTerm(
         func=velocity_tracking_exp,
         weight=0.3,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.6, "command_name": COMMAND_NAME},
+        params={"std": 0.6, "command_name": COMMAND_NAME},
     )
     yaw_tracking = RewTerm(
         func=yaw_tracking_exp,
         weight=0.2,
-        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.35, "command_name": COMMAND_NAME},
+        params={"std": 0.35, "command_name": COMMAND_NAME},
     )
 
     ang_vel_penalty = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.002)

@@ -50,3 +50,25 @@ def position_error_above_maximum(
 
     current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
     return torch.norm(command[:, :3] - current_position, dim=1) > max_error
+
+
+def tracked_position_error_above_maximum(
+    env: ManagerBasedRLEnv, max_error: float, command_name: str = "trajectory"
+) -> torch.Tensor:
+    """Terminate when the frame tracked by a trajectory command has fallen too far behind it.
+
+    Unlike :func:`position_error_above_maximum`, which compares a named body with any position
+    command, this compares the frame tracked by a ``DroneTrajectoryCommand`` (see its
+    ``tracked_frame_state``), so it follows a tool frame when the command tracks one.
+
+    Args:
+        env: The manager-based RL environment instance.
+        max_error: Position error at which to terminate [m].
+        command_name: Name of the trajectory command to read the reference and tracked frame from.
+
+    Returns:
+        A boolean tensor of shape (num_envs,) that is True where the episode should terminate.
+    """
+    command_term = env.command_manager.get_term(command_name)
+    pos_w, _, _ = command_term.tracked_frame_state()
+    return torch.norm(command_term.command[:, :3] - pos_w, dim=1) > max_error

@@ -296,6 +296,7 @@ def reset_root_state_on_trajectory(
     yaw_noise: tuple[float, float] = (-0.3, 0.3),
     rp_noise: tuple[float, float] = (-0.1, 0.1),
     angvel_noise: tuple[float, float] = (-0.2, 0.2),
+    rest_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> None:
     """Reset the drone onto the start of a freshly sampled reference trajectory.
@@ -320,6 +321,10 @@ def reset_root_state_on_trajectory(
         yaw_noise: Range of the yaw offset from the reference yaw [rad].
         rp_noise: Range of the initial roll and pitch [rad].
         angvel_noise: Range of the initial angular velocity about each axis [rad/s].
+        rest_offset: Position of the tracked frame relative to the root when the vehicle is level
+            and any payload hangs at rest, in the yaw-aligned vehicle frame [m]. The root is placed
+            this far from the reference, so that the tracked frame starts on it. Zero when the
+            command tracks the vehicle itself.
         asset_cfg: SceneEntityCfg identifying the asset to reset.
     """
     asset: Articulation = env.scene[asset_cfg.name]
@@ -335,11 +340,22 @@ def reset_root_state_on_trajectory(
         return math_utils.sample_uniform(noise_range[0], noise_range[1], size, device=asset.device)
 
     num_resets = len(env_ids)
-    positions = command_term.pos_ref_w[env_ids] + env.scene.env_origins[env_ids] + _sample(pos_noise, (num_resets, 3))
     roll = _sample(rp_noise, (num_resets,))
     pitch = _sample(rp_noise, (num_resets,))
     yaw = command_term.yaw_ref[env_ids] + _sample(yaw_noise, (num_resets,))
     orientations = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+
+    zeros = torch.zeros_like(yaw)
+    rest_offset_w = math_utils.quat_apply(
+        math_utils.quat_from_euler_xyz(zeros, zeros, yaw),
+        torch.tensor(rest_offset, device=asset.device).expand(num_resets, 3),
+    )
+    positions = (
+        command_term.pos_ref_w[env_ids]
+        - rest_offset_w
+        + env.scene.env_origins[env_ids]
+        + _sample(pos_noise, (num_resets, 3))
+    )
 
     velocities = torch.cat(
         [
