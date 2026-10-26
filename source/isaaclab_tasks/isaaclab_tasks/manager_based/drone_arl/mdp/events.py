@@ -398,6 +398,48 @@ def push_joints_by_velocity(
     asset.write_joint_velocity_to_sim_index(velocity=joint_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
 
 
+def reset_swing_graded_by_env(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    amplitude_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Release a two-axis pendulum from rest at a swing amplitude that grows with the environment index.
+
+    Meant for evaluation: environment ``0`` gets the lower end of :paramref:`amplitude_range`, the last
+    environment the upper end, and those between are spaced evenly, so one run sweeps the whole range
+    and each environment sees the same amplitude in every episode. The direction of the swing is drawn
+    uniformly at random on each reset.
+
+    The amplitude is split over the two hinge axes as ``(A cos(phi), A sin(phi))``, which is the tilt
+    from the rest pose to first order, and each axis is clamped to its soft limits. The joint velocities
+    are zeroed, so the swing starts at its peak.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to reset.
+        amplitude_range: Swing amplitude of the first and of the last environment [rad].
+        asset_cfg: SceneEntityCfg identifying the asset and exactly two hinge joints, outer axis first.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    iter_env_ids = env_ids[:, None]
+
+    fraction = env_ids.float() / max(env.num_envs - 1, 1)
+    amplitude = amplitude_range[0] + (amplitude_range[1] - amplitude_range[0]) * fraction
+    direction = math_utils.sample_uniform(0.0, 2.0 * torch.pi, (len(env_ids),), device=asset.device)
+
+    joint_pos = asset.data.default_joint_pos.torch[iter_env_ids, asset_cfg.joint_ids].clone()
+    joint_pos[:, 0] += amplitude * torch.cos(direction)
+    joint_pos[:, 1] += amplitude * torch.sin(direction)
+    joint_pos_limits = asset.data.soft_joint_pos_limits.torch[iter_env_ids, asset_cfg.joint_ids]
+    joint_pos = joint_pos.clamp_(joint_pos_limits[..., 0], joint_pos_limits[..., 1])
+
+    asset.write_joint_position_to_sim_index(position=joint_pos, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
+    asset.write_joint_velocity_to_sim_index(
+        velocity=torch.zeros_like(joint_pos), joint_ids=asset_cfg.joint_ids, env_ids=env_ids
+    )
+
+
 class RandomizePassiveJointDamping(ManagerTermBase):
     """Scale the simulated damping of unactuated joints by a random factor per environment.
 

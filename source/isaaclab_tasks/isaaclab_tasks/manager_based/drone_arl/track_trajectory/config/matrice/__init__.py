@@ -117,6 +117,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.swing_suppression_env_cfg:MatriceChainsawSwingEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingRNNPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
@@ -128,6 +129,19 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.swing_suppression_env_cfg:MatriceChainsawSwingEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingRNNPPORunnerCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-TrackTrajectory-Matrice-ChainsawSwingHold-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.swing_suppression_env_cfg:MatriceChainsawSwingHoldEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawSwingRNNPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )

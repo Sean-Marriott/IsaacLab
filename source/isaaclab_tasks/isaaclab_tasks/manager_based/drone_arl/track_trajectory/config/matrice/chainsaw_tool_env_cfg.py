@@ -34,6 +34,7 @@ import isaaclab_tasks.manager_based.drone_arl.mdp as mdp
 from isaaclab_tasks.manager_based.drone_arl.mdp.commands import DroneTrajectoryCommandCfg
 from isaaclab_tasks.manager_based.drone_arl.mdp.events import push_joints_by_velocity
 from isaaclab_tasks.manager_based.drone_arl.mdp.rewards import (
+    PayloadSwingEnergyExp,
     ToolEndTargetExp,
     position_tracking_exp,
     velocity_tracking_exp,
@@ -49,8 +50,8 @@ from .chainsaw_env_cfg import (
     ChainsawEventCfg,
     MatriceChainsawTrajectoryEnvCfg,
 )
-from .swing_suppression_env_cfg import HINGE_JOINT_NAMES
-from .track_trajectory_env_cfg import COMMAND_NAME, TerminationsCfg, set_speed_envelope
+from .swing_suppression_env_cfg import HINGE_JOINT_NAMES, PAYLOAD_BODY_NAMES, PIVOT_BODY_NAME
+from .track_trajectory_env_cfg import COMMAND_NAME, TerminationsCfg
 
 TOOL_BODY_NAME = "roll_link"
 """The saw body, which carries the cutting mouth."""
@@ -185,11 +186,25 @@ class ChainsawToolRewardsCfg:
         },
     )
 
-    # note: there is deliberately no swing-suppression term. With the reference at rest during the
-    # hold, the mouth can only stay on the target if the payload hangs still, so the end terms above
-    # already penalize any leftover swing, and on the point that matters rather than on the payload
-    # COM. If the hold error turns out to oscillate at the pendulum period, the swing task's
-    # PayloadSwingEnergyExp with ``window_s=END_HOLD_S`` is the term to try.
+    # -- swing
+    # The swing task's term, with the same deadzone: swings under ~3 deg (0.03 J) score the full
+    # reward, so the policy is not driven to rock the airframe chasing the last degree or two. Only
+    # active during the hold. While the reference moves, leading the tool means letting the payload
+    # lean (tan(theta) = a / g), and this term would count that lean as swing and fight the tracking.
+    # During the hold the end terms above already penalize a swinging mouth; this adds a signal on the
+    # payload's swing energy itself, which falls to 1/e at about 10 deg.
+    swing_suppression = RewTerm(
+        func=PayloadSwingEnergyExp,  # type: ignore[arg-type]
+        weight=0.5,
+        params={
+            "payload_cfg": SceneEntityCfg("robot", body_names=PAYLOAD_BODY_NAMES),
+            "pivot_cfg": SceneEntityCfg("robot", body_names=[PIVOT_BODY_NAME]),
+            "energy_scale": 0.3,
+            "energy_deadzone": 0.03,
+            "window_s": END_HOLD_S,
+            "command_name": COMMAND_NAME,
+        },
+    )
 
 
 @configclass

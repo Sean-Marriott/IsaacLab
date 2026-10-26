@@ -510,6 +510,16 @@ class PayloadSwingEnergy(ManagerTermBase):
         Returns:
             A 1-D tensor of shape (num_envs,) with the swing energy [J].
         """
+        energy, _, _ = self.swing_state(env)
+        return energy
+
+    def swing_state(self, env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute the swing energy together with the pendulum quantities it is measured against.
+
+        Returns:
+            A tuple ``(energy, total_mass, length)``: the swing energy [J], the payload mass [kg] and
+            the pivot-to-COM distance [m], each of shape (num_envs,).
+        """
         data = self._asset.data
         if self._mass is None:
             self._mass = data.body_mass.torch[:, self._payload_ids].to(env.device)
@@ -527,7 +537,22 @@ class PayloadSwingEnergy(ManagerTermBase):
 
         kinetic = 0.5 * total_mass * torch.sum(vel_rel**2, dim=-1)
         potential = total_mass * self._gravity * length * (1.0 - cos_tilt)
-        return kinetic + potential
+        return kinetic + potential, total_mass, length
+
+    def swing_amplitude(self, env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor]:
+        """Amplitude of the swing, as the angle from vertical at which the payload would hold all of
+        its swing energy as potential energy.
+
+        Unlike the instantaneous angle, this is conserved over a swing cycle, so it does not pulse
+        twice per period: ``theta_amp = acos(1 - E / (m * g * L))``.
+
+        Returns:
+            A tuple ``(theta_amp, length)``: the amplitude [rad], in [0, pi], and the pivot-to-COM
+            distance [m], each of shape (num_envs,).
+        """
+        energy, total_mass, length = self.swing_state(env)
+        potential_scale = (total_mass * self._gravity * length).clamp_min(1e-6)
+        return torch.acos((1.0 - energy / potential_scale).clamp(-1.0, 1.0)), length
 
 
 class PayloadSwingEnergyExp(PayloadSwingEnergy):
@@ -537,9 +562,18 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
     amplitude: on a payload with ``m * g * L`` of about 22.4 J (the Mk3 chainsaw), an ``energy_scale`` of 0.3 J falls to
     ``1/e`` at a swing of roughly 9.5 deg.
 
+    An optional deadzone makes the kernel ``exp(-max(E - energy_deadzone, 0) / energy_scale)``: any swing
+    with less energy than the deadzone scores the full reward, so the policy gains nothing by chasing
+    a small residual swing, which it otherwise does by rocking the airframe back and forth. Since the
+    swing energy is conserved over a cycle, the deadzone is a bound on the amplitude: on the Mk3
+    chainsaw, 0.03 J is a swing of about 3 deg. Outside the deadzone the kernel is the same curve,
+    shifted by the deadzone, so the reward is continuous at its edge.
+
     Takes the same ``params`` as :class:`PayloadSwingEnergy`, plus:
 
-    * ``energy_scale``: Swing energy at which the kernel falls to ``1/e`` [J].
+    * ``energy_scale``: Swing energy at which the kernel falls to ``1/e``, measured from the edge
+      of the deadzone [J].
+    * ``energy_deadzone``: Swing energy below which the reward is 1 [J]. Defaults to 0, no deadzone.
     * ``window_s``: If given, the reward is zero except during the last ``window_s`` seconds of the
       trajectory reference, as in :class:`ToolEndTargetExp` [s]. If ``None``, the default, it is
       active over the whole episode.
@@ -553,6 +587,7 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
         payload_cfg: SceneEntityCfg,
         pivot_cfg: SceneEntityCfg,
         energy_scale: float = 0.3,
+        energy_deadzone: float = 0.0,
         window_s: float | None = None,
         command_name: str = "trajectory",
     ) -> torch.Tensor:
@@ -562,7 +597,7 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
             A 1-D tensor of shape (num_envs,) with values in [0, 1].
         """
         energy = super().__call__(env, payload_cfg, pivot_cfg)
-        reward = torch.exp(-energy / energy_scale)
+        reward = torch.exp(-(energy - energy_deadzone).clamp_min(0.0) / energy_scale)
         if window_s is not None:
             cmd = env.command_manager.get_term(command_name)
             reward = reward * (cmd.ref_time >= cmd.episode_length_s - window_s)
@@ -816,6 +851,12 @@ class DroneEndPoseExp(ManagerTermBase):
 
     It is zero except during the last ``window_s`` seconds of the episode.
 
+    With ``radius`` set, the position error is measured from the surface of a ball of that radius
+    around the target rather than from its centre, ``|p_err| -> max(|p_err| - radius, 0)``, so the
+    vehicle is free to move anywhere inside the ball. With ``yaw_only`` set, the orientation error
+    is the yaw error alone: roll and pitch are how a multirotor accelerates, so a term that has to
+    allow the vehicle to manoeuvre about the target must not penalize them.
+
     When the simulation is rendering and ``debug_vis`` is set, the target pose and the current pose
     of the body are drawn as coordinate frames (x red, y green, z blue) on every rendered frame: the
     larger frame is the target, the smaller one the vehicle. The target is drawn for the whole
@@ -828,6 +869,10 @@ class DroneEndPoseExp(ManagerTermBase):
     * ``std_rot``: Standard deviation of the kernel on the orientation error [rad].
     * ``window_s``: Length of the window before the episode end in which the reward is active [s].
     * ``command_name``: Name of the :class:`DroneTrajectoryCommand` to read the end pose from.
+    * ``radius``: Radius of the ball around the target inside which the position error is zero [m].
+      Defaults to 0, the target point itself.
+    * ``yaw_only``: Whether to compare the yaw alone rather than the full orientation. Defaults to
+      False.
     * ``debug_vis``: Whether to draw the pose markers. Defaults to True.
     """
 
@@ -893,6 +938,8 @@ class DroneEndPoseExp(ManagerTermBase):
         std_rot: float,
         window_s: float,
         command_name: str = "trajectory",
+        radius: float = 0.0,
+        yaw_only: bool = False,
         debug_vis: bool = True,
     ) -> torch.Tensor:
         """Compute the reward.
@@ -900,16 +947,100 @@ class DroneEndPoseExp(ManagerTermBase):
         Returns:
             A 1-D tensor of shape (num_envs,) with values in [0, 1].
         """
+        return self._reward(env, std_pos, std_rot, window_s, radius, yaw_only)
+
+    def _reward(
+        self,
+        env: ManagerBasedRLEnv,
+        std_pos: float,
+        std_rot: float,
+        window_s: float,
+        radius: float | torch.Tensor,
+        yaw_only: bool,
+    ) -> torch.Tensor:
+        """Kernel shared by this term and its subclasses, with ``radius`` either a constant [m] or a
+        per-environment tensor of shape (num_envs,) [m]."""
         target_pos, target_quat = self._target_pose()
         body_pos = self._asset.data.body_pos_w.torch[:, self._body_id] - env.scene.env_origins
         body_quat = self._asset.data.body_quat_w.torch[:, self._body_id]
 
-        pos_error_sq = torch.sum(torch.square(body_pos - target_pos), dim=1)
-        rot_error = math_utils.quat_error_magnitude(body_quat, target_quat)
+        pos_error = torch.norm(body_pos - target_pos, dim=1)
+        pos_error_sq = torch.square((pos_error - radius).clamp_min(0.0))
+        if yaw_only:
+            _, _, yaw = math_utils.euler_xyz_from_quat(body_quat)
+            rot_error = math_utils.wrap_to_pi(yaw - self._command_term.yaw_end)
+        else:
+            rot_error = math_utils.quat_error_magnitude(body_quat, target_quat)
 
         cmd = self._command_term
         active = cmd.ref_time >= cmd.episode_length_s - window_s
         return torch.exp(-pos_error_sq / std_pos**2 - torch.square(rot_error) / std_rot**2) * active
+
+
+class SwingRadiusEndPoseExp(DroneEndPoseExp):
+    """:class:`DroneEndPoseExp` with a hold radius that grows with the payload swing.
+
+    Damping a hanging payload means moving its pivot: the vehicle has to accelerate in the direction
+    the payload swings, which takes it some way off the target and tilts it. A term that rewards the
+    exact target point forbids exactly that, so the vehicle is given a ball around the target to
+    manoeuvre in, sized by how much swing there is to remove:
+
+    ``radius = clamp(radius_min + radius_gain * L * theta_amp, max=radius_max)``
+
+    where ``L * theta_amp`` is the arc of the swing (see :meth:`PayloadSwingEnergy.swing_amplitude`).
+    Once the swing has been damped the ball shrinks back to ``radius_min``, so the vehicle still has
+    to hold the target closely while the payload hangs still, rather than settle anywhere in a fixed
+    ball. The pivot excursion that damps a swing of amplitude ``theta`` in a time ``tau`` is about
+    ``2 * L * theta / (omega * tau)``; on the Mk3 chainsaw (``omega`` ~3 rad/s) a ``radius_gain`` of
+    0.75 leaves room to damp it in about a second.
+
+    The orientation is compared on the yaw alone by default, since the tilt is how the vehicle
+    accelerates.
+
+    Takes the same ``params`` as :class:`DroneEndPoseExp`, except ``radius``, plus those of
+    :class:`PayloadSwingEnergy`:
+
+    * ``payload_cfg``: SceneEntityCfg with every body below the pivot as ``body_names``.
+    * ``pivot_cfg``: SceneEntityCfg with the body whose link frame origin is the pivot.
+    * ``radius_min``: Hold radius with the payload hanging still [m].
+    * ``radius_gain``: Hold radius per metre of swing arc [m/m].
+    * ``radius_max``: Upper bound on the hold radius [m].
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._swing = PayloadSwingEnergy(cfg, env)
+
+    def hold_radius(
+        self, env: ManagerBasedRLEnv, radius_min: float, radius_gain: float, radius_max: float
+    ) -> torch.Tensor:
+        """Hold radius for the current swing [m], shape (num_envs,)."""
+        theta_amp, length = self._swing.swing_amplitude(env)
+        return (radius_min + radius_gain * length * theta_amp).clamp(max=radius_max)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        payload_cfg: SceneEntityCfg,
+        pivot_cfg: SceneEntityCfg,
+        std_pos: float,
+        std_rot: float,
+        window_s: float,
+        radius_min: float = 0.05,
+        radius_gain: float = 0.75,
+        radius_max: float = 0.4,
+        command_name: str = "trajectory",
+        yaw_only: bool = True,
+        debug_vis: bool = True,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with values in [0, 1].
+        """
+        radius = self.hold_radius(env, radius_min, radius_gain, radius_max)
+        return self._reward(env, std_pos, std_rot, window_s, radius, yaw_only)
 
 
 def _frame_marker_cfg(base_cfg: VisualizationMarkersCfg, prim_path: str, scale: float) -> VisualizationMarkersCfg:

@@ -3,9 +3,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from dataclasses import MISSING
+
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlRNNModelCfg,
+)
 
 
 @configclass
@@ -72,6 +79,50 @@ class ChainsawSwingPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
     """PPO configuration for the chainsaw swing-suppression task, logged to its own folder."""
 
     experiment_name = "matrice_chainsaw_swing"
+
+
+@configclass
+class ChainsawSwingRNNPPORunnerCfg(ChainsawSwingPPORunnerCfg):
+    """Recurrent PPO configuration for the chainsaw swing-suppression task, logged to its own folder.
+
+    The swing dynamics depend on parameters the policy cannot observe in a single frame: hinge damping
+    and spring rate are randomized over 0.5-2x, the saw mass over +/-15%, the airframe mass over +/-20%,
+    and the observations arrive with a random 0-1 step lag. A GRU in front of the MLP lets the policy
+    infer them from the recent response of the payload, as an adaptive controller would, rather than
+    having to act on the average over the randomization.
+
+    Select it with ``--agent rsl_rl_rnn_cfg_entry_point``.
+    """
+
+    experiment_name = "matrice_chainsaw_swing_rnn"
+    # Gradients are truncated at the rollout length, so the rollout has to cover enough of the swing to
+    # identify it. The Mk3 pendulum runs at ~3 rad/s (a ~2.1 s period); 48 steps at 10 Hz is 4.8 s,
+    # about two periods, where the 32-step default sees only one and a half.
+    num_steps_per_env = 48
+
+    # The deprecated ``policy`` block is cleared so it does not override the models below.
+    policy = MISSING
+    # A smaller MLP than the feed-forward policy: the GRU state already carries the history.
+    actor = RslRlRNNModelCfg(
+        hidden_dims=[256, 128],
+        activation="elu",
+        obs_normalization=True,
+        # Same initial std as the feed-forward runner, in normalized action units.
+        distribution_cfg=RslRlRNNModelCfg.GaussianDistributionCfg(init_std=0.3),
+        rnn_type="gru",
+        rnn_hidden_dim=256,
+        rnn_num_layers=1,
+    )
+    # The critic is recurrent too: with the same partial observations it needs the history as much as
+    # the actor does to value a state.
+    critic = RslRlRNNModelCfg(
+        hidden_dims=[256, 128],
+        activation="elu",
+        obs_normalization=True,
+        rnn_type="gru",
+        rnn_hidden_dim=256,
+        rnn_num_layers=1,
+    )
 
 
 @configclass
