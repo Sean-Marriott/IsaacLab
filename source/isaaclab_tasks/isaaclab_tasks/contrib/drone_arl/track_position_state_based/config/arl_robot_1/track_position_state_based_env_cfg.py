@@ -159,7 +159,7 @@ class RewardsCfg:
         func=distance_to_goal_exp,
         weight=25.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 1.5,
             "command_name": "target_pose",
         },

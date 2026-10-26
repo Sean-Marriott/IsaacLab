@@ -83,7 +83,7 @@ class ArlNavigationSceneCfg(InteractiveSceneCfg):
                 prim_expr=f"{{ENV_REGEX_NS}}/obstacle_{i}", is_shared=False, track_mesh_transforms=True
             )
             for i in range(OBSTACLE_SCENE_CFG.max_num_obstacles)
-        ],
+        ],  # type: ignore
         offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
             pos=(0.15, 0.0, 0.04), rot=(1.0, 0.0, 0.0, 0.0), convention="world"
         ),
@@ -245,7 +245,7 @@ class RewardsCfg:
         func=distance_to_goal_exp_curriculum,
         weight=2.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 7.0,
             "command_name": "target_pose",
         },
@@ -254,7 +254,7 @@ class RewardsCfg:
         func=distance_to_goal_exp_curriculum,
         weight=4.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
             "std": 0.5,
             "command_name": "target_pose",
         },

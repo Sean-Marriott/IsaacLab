@@ -20,25 +20,31 @@ import isaaclab.utils.math as math_utils
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.images import normalize_depth
 
+# ``source/isaaclab_tasks/data``, which ships the drone ARL VAE weights
+_ISAACLAB_TASKS_DATA_DIR = os.path.join(os.path.dirname(__file__), *([os.pardir] * 4), "data")
+
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
     from isaaclab.managers import ObservationTermCfg
     from isaaclab.sensors.camera.camera import Camera
     from isaaclab.sensors.camera.tiled_camera import TiledCamera
+    from isaaclab.sensors.ray_caster.multi_mesh_ray_caster import MultiMeshRayCaster
     from isaaclab.sensors.ray_caster.multi_mesh_ray_caster_camera import MultiMeshRayCasterCamera
     from isaaclab.sensors.ray_caster.ray_caster_camera import RayCasterCamera
 
     from isaaclab_contrib.assets import Multirotor
 
+    from .commands import DroneTrajectoryCommand
+
 from isaaclab.envs.utils.io_descriptors import generic_io_descriptor, record_shape
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
 """
 State.
 """
 
 
+@generic_io_descriptor(dtype=torch.float32, observation_type="RootState", on_inspect=[record_shape])
 def base_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Return the base roll and pitch in the simulation world frame.
 
@@ -68,6 +74,119 @@ def base_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntit
 """
 Sensors
 """
+
+
+def lidar_scan(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Lidar ranges from the given sensor.
+
+    This returns per-ray distances [m] from the sensor origin to hit points in world frame.
+    Rays without a valid hit are set to the sensor maximum distance.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        normalize: If True, scale ranges by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Per-ray lidar ranges. Shape is (num_envs, num_rays).
+    """
+    # extract the used quantities (to enable type-hinting)
+    sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+
+    # Compute Euclidean range to each hit point.
+    ray_vectors_w = sensor.data.ray_hits_w.torch - sensor.data.pos_w.torch.unsqueeze(1)
+    ranges = torch.linalg.norm(ray_vectors_w, dim=-1)
+
+    # Replace invalid hits (inf/nan) with max distance.
+    max_distance = float(sensor.cfg.max_distance)
+    ranges = torch.nan_to_num(ranges, nan=max_distance, posinf=max_distance, neginf=0.0)
+    ranges = torch.clamp(ranges, min=0.0, max=max_distance)
+
+    if normalize:
+        return ranges / max_distance
+    return ranges
+
+
+def lidar_min_distance(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Minimum lidar range (closest obstacle) from the given sensor.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        normalize: If True, scale distance by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Minimum range per environment. Shape is (num_envs, 1).
+    """
+    # Reuse range computation from lidar_scan to keep behavior consistent.
+    ranges = lidar_scan(env=env, sensor_cfg=sensor_cfg, normalize=False)
+    min_range = torch.min(ranges, dim=1, keepdim=True).values
+
+    if normalize:
+        sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+        max_distance = float(sensor.cfg.max_distance)
+        return min_range / max_distance
+    return min_range
+
+
+def lidar_sector_min_distances(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    num_sectors: int = 8,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Directional lidar feature using minimum range per azimuth sector.
+
+    Rays are grouped by their azimuth angle in the sensor frame. For each sector,
+    this returns the minimum hit distance [m]. This preserves directional obstacle
+    information with a compact observation size.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity configuration for a :class:`MultiMeshRayCaster` sensor.
+        num_sectors: Number of uniform azimuth sectors spanning [-pi, pi].
+        normalize: If True, scale ranges by ``sensor.cfg.max_distance`` to [0, 1].
+
+    Returns:
+        Sector-wise minimum distances. Shape is (num_envs, num_sectors).
+    """
+    if num_sectors <= 0:
+        raise ValueError("num_sectors must be positive.")
+
+    sensor: MultiMeshRayCaster = env.scene.sensors[sensor_cfg.name]  # type: ignore[assignment]
+    ranges = lidar_scan(env=env, sensor_cfg=sensor_cfg, normalize=False)
+
+    # Ray directions are defined in the sensor frame and repeated across envs.
+    ray_directions = sensor.ray_directions[0]
+    azimuth = torch.atan2(ray_directions[:, 1], ray_directions[:, 0])
+
+    max_distance = float(sensor.cfg.max_distance)
+    sector_mins = torch.full((env.num_envs, num_sectors), max_distance, device=env.device)
+
+    # Uniform azimuth partition in [-pi, pi].
+    bin_edges = torch.linspace(-torch.pi, torch.pi, num_sectors + 1, device=env.device)
+    for sector_idx in range(num_sectors):
+        start_angle = bin_edges[sector_idx]
+        end_angle = bin_edges[sector_idx + 1]
+        if sector_idx == num_sectors - 1:
+            in_sector = (azimuth >= start_angle) & (azimuth <= end_angle)
+        else:
+            in_sector = (azimuth >= start_angle) & (azimuth < end_angle)
+
+        if in_sector.any():
+            sector_mins[:, sector_idx] = ranges[:, in_sector].amin(dim=1)
+
+    if normalize:
+        return sector_mins / max_distance
+    return sector_mins
 
 
 class ImageLatentObservation(ManagerTermBase):
@@ -128,8 +247,8 @@ class ImageLatentObservation(ManagerTermBase):
         super().__init__(cfg, env)
         self.camera_sensor: TiledCamera | Camera | RayCasterCamera | MultiMeshRayCasterCamera = env.scene.sensors[
             cfg.params["sensor_cfg"].name
-        ]
-        self.data_type: str = cfg.params["data_type"]
+        ]  # type: ignore
+        self.data_type: str = cfg.params["data_type"]  # type: ignore
         self.convert_perspective_to_orthogonal = bool(cfg.params.get("convert_perspective_to_orthogonal", False))
         self.normalize = bool(cfg.params.get("normalize", True))
 
@@ -152,10 +271,8 @@ class ImageLatentObservation(ManagerTermBase):
             RuntimeError: If the model cannot be loaded (e.g., corrupted file).
         """
         if cls._model is None:
-            model_path = os.path.join(ISAACLAB_NUCLEUS_DIR, "Contrib/Drone/vae_model.pt")
-            download_dir = os.path.join(".pretrained_checkpoints", "drone_arl", "vae_model.pt")
-            resume_path = retrieve_file_path(model_path, download_dir)
-            cls._model = torch.jit.load(resume_path, map_location=device)
+            model_path = os.path.join(_ISAACLAB_TASKS_DATA_DIR, "drone_arl", "vae_model.pt")
+            cls._model = torch.jit.load(model_path, map_location=device)
             cls._model.eval()
         return cls._model
 
@@ -278,3 +395,176 @@ def generated_drone_commands(
     current_position_b_dir = current_position_b / (torch.linalg.norm(current_position_b, dim=-1, keepdim=True) + 1e-8)
     current_position_b_mag = torch.linalg.norm(current_position_b, dim=-1, keepdim=True)
     return torch.cat((current_position_b_dir, current_position_b_mag), dim=-1)
+
+
+"""
+Trajectory tracking.
+
+All of these express the reference in the *yaw-only vehicle frame* rather than the full body frame.
+That matches how :class:`~isaaclab_contrib.controllers.LeeVelController` interprets the velocity
+action: it builds its setpoint frame from yaw alone. Using the full body frame would mix roll and
+pitch into the observation-to-action mapping and force the network to undo a rotation it does not
+command. Roll and pitch still reach the policy through :func:`base_roll_pitch` and the body-frame
+linear and angular velocities.
+
+The errors are taken against the frame the command tracks (see
+:meth:`~isaaclab_tasks.contrib.drone_arl.mdp.commands.DroneTrajectoryCommand.tracked_frame_state`),
+which is the vehicle unless the command is set to track a payload frame such as a tool tip. They are
+still expressed in the vehicle frame, since that is the frame the action is in.
+"""
+
+
+def _vehicle_frame_quat(asset: Multirotor) -> torch.Tensor:
+    """Return the yaw-only orientation of the asset. Shape is (num_envs, 4)."""
+    return math_utils.yaw_quat(asset.data.root_link_quat_w.torch)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_position_error_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Position error to the reference, in the vehicle frame.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference position minus the position of the tracked frame [m], expressed in the
+        yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    pos_w, _, _ = command_term.tracked_frame_state()
+    error_w = command_term.command[:, :3] - pos_w
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_velocity_error_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Velocity error to the reference, in the vehicle frame.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference velocity minus the velocity of the tracked frame [m/s], expressed in the
+        yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    _, _, lin_vel_w = command_term.tracked_frame_state()
+    error_w = command_term.command[:, 3:6] - lin_vel_w
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), error_w)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_velocity_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reference velocity feed-forward, in the vehicle frame.
+
+    The optimal action is roughly ``v_ref + Kp * position_error``, so handing the policy ``v_ref``
+    directly leaves it only the correction to learn.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference velocity [m/s] in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), command[:, 3:6])
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_accel_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reference acceleration feed-forward, in the vehicle frame.
+
+    This is what lets the policy lead the first-order velocity loop instead of lagging it.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The reference acceleration [m/s^2] in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), command[:, 6:9])
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_yaw_error(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Yaw error of the tracked frame to the reference, wrapped to (-pi, pi].
+
+    The Lee velocity controller commands yaw *rate* and never closes a loop on yaw angle, so the
+    policy has to close it and therefore needs this term.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset. Unused: the yaw is that of the tracked frame.
+
+    Returns:
+        The wrapped yaw error [rad]. Shape is (num_envs, 1).
+    """
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    _, quat_w, _ = command_term.tracked_frame_state()
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    return math_utils.wrap_to_pi(command_term.command[:, 9] - yaw).unsqueeze(-1)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_ref_yaw_rate(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Reference yaw rate feed-forward.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+
+    Returns:
+        The reference yaw rate [rad/s]. Shape is (num_envs, 1).
+    """
+    return env.command_manager.get_command(command_name)[:, 10:11]
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_lookahead_v(
+    env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Future reference positions relative to the current one, in the vehicle frame.
+
+    Each look-ahead point is reported as an offset from the *current* position of the tracked frame
+    rather than as an absolute one, so the observation stays bounded and centred on zero regardless
+    of where in the environment the drone is.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        asset_cfg: SceneEntityCfg identifying the asset.
+
+    Returns:
+        The look-ahead offsets [m] in the yaw-only vehicle frame, flattened.
+        Shape is (num_envs, 3 * num_lookahead).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    position_w, _, _ = command_term.tracked_frame_state()
+    lookahead_w = command_term.command[:, 11:].reshape(env.num_envs, -1, 3) - position_w.unsqueeze(1)
+    vehicle_quat = _vehicle_frame_quat(asset).unsqueeze(1).expand(-1, lookahead_w.shape[1], -1)
+    return math_utils.quat_apply_inverse(vehicle_quat, lookahead_w).flatten(start_dim=1)

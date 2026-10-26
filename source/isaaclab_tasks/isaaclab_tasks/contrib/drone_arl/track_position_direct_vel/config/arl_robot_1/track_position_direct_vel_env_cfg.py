@@ -1,0 +1,347 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import math
+from dataclasses import MISSING
+
+from isaaclab_physx.physics import PhysxCfg
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.noise import GaussianNoiseCfg as Gnoise
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+
+from isaaclab_contrib.assets import MultirotorCfg
+from isaaclab_contrib.controllers import LeeVelControllerCfg
+
+import isaaclab_tasks.contrib.drone_arl.mdp as mdp
+from isaaclab_tasks.contrib.drone_arl.mdp.commands import DroneUniformPoseCommandCfg
+from isaaclab_tasks.contrib.drone_arl.mdp.rewards import (
+    PoleEnergy,
+    distance_to_goal_l2,
+    yaw_aligned,
+)
+from isaaclab_tasks.contrib.drone_arl.mdp.tensor_processors import DelayedObservationCfg
+from isaaclab_tasks.contrib.drone_arl.mdp.terminations import root_height_above_maximum
+
+EPISODE_LENGTH_SECONDS = 20.0
+
+
+##
+# Scene definition
+##
+@configclass
+class ArlTrackPositionDirectVelSceneCfg(InteractiveSceneCfg):
+    """Configuration for the terrain scene with a flying robot."""
+
+    # robots
+    robot: MultirotorCfg = MISSING
+
+    # lights
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=750.0,
+            texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
+        ),
+    )
+
+
+##
+# MDP settings
+##
+
+
+@configclass
+class CommandsCfg:
+    """Command specifications for the MDP."""
+
+    target_pose = DroneUniformPoseCommandCfg(
+        asset_name="robot",
+        body_name="base_link",
+        resampling_time_range=(EPISODE_LENGTH_SECONDS, EPISODE_LENGTH_SECONDS),
+        debug_vis=True,
+        ranges=DroneUniformPoseCommandCfg.Ranges(
+            pos_x=(-0.0, 0.0),
+            pos_y=(-0.0, 0.0),
+            pos_z=(-0.0, 0.0),
+            roll=(-0.0, 0.0),
+            pitch=(-0.0, 0.0),
+            yaw=(-0.0, 0.0),
+        ),
+    )
+
+
+@configclass
+class ActionsCfg:
+    """Action specifications for the MDP."""
+
+    velocity_command = mdp.DirectVelocityActionCfg(
+        asset_name="robot",
+        scale=1.0,
+        offset=0.0,
+        preserve_order=False,
+        use_default_offset=False,
+        controller_cfg=LeeVelControllerCfg(
+            # ARL Robot 1 gains (well-tuned baseline).
+            # MatriceDirectVelEnvCfg overrides these three ranges for the M350.
+            K_vel_range=((2.5, 2.5, 1.5), (3.5, 3.5, 2.0)),
+            K_rot_range=((1.6, 1.6, 0.25), (1.85, 1.85, 0.4)),
+            K_angvel_range=((0.4, 0.4, 0.075), (0.5, 0.5, 0.09)),
+            max_inclination_angle_rad=1.0471975511965976,
+            max_yaw_rate=1.0471975511965976,
+        ),
+        max_velocity=0.5,  # 0.5 m/s
+        max_yaw_rate=0.7853982,  # 45 deg/s
+    )
+
+
+@configclass
+class ObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group."""
+
+        base_link_position = ObsTerm(func=mdp.root_pos_w, noise=Unoise(n_min=-0.1, n_max=0.1))
+        base_orientation = ObsTerm(func=mdp.root_quat_w, noise=Unoise(n_min=-0.1, n_max=0.1))
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.1, n_max=0.1))
+
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"])},
+            noise=Gnoise(mean=0.0, std=0.0175),
+            tensor_processors=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        )  # ~1.0°/s std
+
+        joint_pitch_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"])},
+            noise=Gnoise(mean=0.0, std=0.035),
+            tensor_processors=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        )  # ~2.0°/s std
+
+        joint_roll_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"])},
+            noise=Gnoise(mean=0.0, std=0.125),
+            tensor_processors=[
+                DelayedObservationCfg(
+                    min_lag=0,
+                    max_lag=3,
+                    per_env=True,
+                    hold_prob=0.66,
+                    update_period=3,
+                    per_env_phase=True,
+                )
+            ],
+        )  # ~7.0°/s std
+
+        last_action = ObsTerm(func=mdp.last_action, noise=Unoise(n_min=-0.0, n_max=0.0))
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    # observation groups
+    policy: PolicyCfg = PolicyCfg()
+
+
+@configclass
+class EventCfg:
+    """Configuration for events."""
+
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {
+                "x": (-2.0, 2.0),
+                "y": (-2.0, 2.0),
+                "z": (-2.0, 2.0),
+                "yaw": (-math.pi, math.pi),
+                "roll": (-math.pi / 6.0, math.pi / 6.0),
+                "pitch": (-math.pi / 6.0, math.pi / 6.0),
+            },
+            "velocity_range": {
+                "x": (-0.2, 0.2),
+                "y": (-0.2, 0.2),
+                "z": (-0.2, 0.2),
+                "roll": (-0.2, 0.2),
+                "pitch": (-0.2, 0.2),
+                "yaw": (-0.2, 0.2),
+            },
+        },
+    )
+
+    reset_chainsaw_pitch = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-math.pi / 3, math.pi / 3),
+            "velocity_range": (-0.2, 0.2),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch"]),
+        },
+    )
+
+    reset_chainsaw_roll = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-0.6, 0.6),  # (~±35°)
+            "velocity_range": (-0.1, 0.1),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubeRoll"]),
+        },
+    )
+
+    # intervals
+    push_robot = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(0.0, EPISODE_LENGTH_SECONDS),
+        params={
+            "force_range": (-0.1, 0.1),
+            "torque_range": (-0.05, 0.05),
+        },
+    )
+
+    push_pole = EventTerm(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(10.0, 10.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["chainsaw"]),
+            "force_range": (-50.0, 50.0),
+            "torque_range": (-1.0, 1.0),
+        },
+    )
+
+
+@configclass
+class RewardsCfg:
+    """Reward terms for the MDP."""
+
+    distance_to_goal_l2 = RewTerm(
+        func=distance_to_goal_l2,
+        weight=-1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+            "command_name": "target_pose",
+        },
+    )
+    # distance_to_goal_exp = RewTerm(
+    #     func=distance_to_goal_exp,
+    #     weight=15.0,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+    #         "std": 2.0,
+    #         "command_name": "target_pose",
+    #     },
+    # )
+    # distance_to_goal_tanh = RewTerm(
+    #     func=distance_to_goal_tanh,
+    #     weight=35.0,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=["base_link"]),
+    #         "std": 0.5,
+    #         "command_name": "target_pose",
+    #         },
+    # )
+    yaw_aligned = RewTerm(
+        func=yaw_aligned,
+        weight=5.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "std": 0.25},
+    )
+    pole_energy = RewTerm(
+        func=PoleEnergy,  # type: ignore[arg-type]
+        weight=-100.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["csTubePitch", "csTubeRoll"]),
+            "pole_body_cfg": SceneEntityCfg("robot", body_names=["chainsaw"]),
+        },
+    )
+    termination_penalty = RewTerm(
+        func=mdp.is_terminated,
+        weight=-500.0,
+    )
+    # action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    # action_magnitude_l2 = RewTerm(func=mdp.action_l2, weight=-0.05)
+
+
+@configclass
+class TerminationsCfg:
+    """Termination terms for the MDP."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    crash_floor = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": -10.0})
+    crash_ceiling = DoneTerm(func=root_height_above_maximum, params={"maximum_height": 10.0})
+
+
+##
+# Environment configuration
+##
+
+
+@configclass
+class TrackPositionDirectVelEnvCfg(ManagerBasedRLEnvCfg):
+    """Configuration for the direct-velocity drone position-tracking environment."""
+
+    # Scene settings
+    scene: ArlTrackPositionDirectVelSceneCfg = ArlTrackPositionDirectVelSceneCfg(num_envs=4096, env_spacing=2.5)
+    # Basic settings
+    observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    # MDP settings
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+    events: EventCfg = EventCfg()
+
+    def __post_init__(self):
+        """Post initialization."""
+        self.decimation = 10
+
+        self.episode_length_s = EPISODE_LENGTH_SECONDS
+        self.sim.dt = 0.01
+        self.sim.render_interval = self.decimation
+        self.sim.physics_material = sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        )
+        self.sim.physics = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
+        # ThrusterCfg is implemented in Isaac Lab and has no Newton-native execution path.
+        self.sim.use_newton_actuators = False

@@ -19,6 +19,7 @@ from isaaclab_physx.assets.kernels import split_state_to_root_pose_and_vel
 
 import isaaclab.utils.string as string_utils
 from isaaclab.utils import instantiate
+from isaaclab.utils.warp import ProxyArray
 
 from isaaclab_contrib.actuators import Thruster
 from isaaclab_contrib.utils.types import MultiRotorActions
@@ -411,6 +412,24 @@ class Multirotor(Articulation):
         # Set using public setters
         self._data.default_root_pose = pose_output
         self._data.default_root_vel = vel_output
+
+        # Handle joint state (like parent does). Passive joints, such as a hanging payload, need a
+        # non-zero default so that resetting them to their defaults does not start them off-rest.
+        # A bare airframe has no joints at all, which the default ``{".*": 0.0}`` would fail to match.
+        for attr, values in (
+            ("default_joint_pos", self.cfg.init_state.joint_pos if self.num_joints > 0 else {}),
+            ("default_joint_vel", self.cfg.init_state.joint_vel if self.num_joints > 0 else {}),
+        ):
+            indices_list, _, values_list = string_utils.resolve_matching_names_values(values, self.joint_names)
+            if indices_list:
+                wp.to_torch(getattr(self._data, attr))[:, indices_list] = torch.tensor(values_list, device=self.device)
+
+        # Soft joint velocity limits. The parent binds these to its actuator collection, which this
+        # class skips, so without this they are unset and every joint reset that clamps to them
+        # (e.g. ``reset_joints_by_offset``) fails. Passive joints have no actuator model, so the
+        # solver limits are used as they are.
+        wp.copy(self._data._soft_joint_vel_limits, self._data.joint_vel_limits.warp)
+        self._data._soft_joint_vel_limits_ta = ProxyArray(self._data._soft_joint_vel_limits)
 
         # Handle thruster-specific initial state
         if hasattr(self._data, "default_thruster_rps") and hasattr(self.cfg.init_state, "rps"):
