@@ -54,6 +54,27 @@ class TrackTrajectoryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class DetunedTrajectoryPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
+    """PPO configuration for the detuned trajectory-following task, logged to its own folder."""
+
+    experiment_name = "matrice_track_trajectory_detuned"
+
+
+@configclass
+class ChainsawTrajectoryPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
+    """PPO configuration for the chainsaw trajectory-following task, logged to its own folder."""
+
+    experiment_name = "matrice_chainsaw_trajectory"
+
+
+@configclass
+class ChainsawSwingPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
+    """PPO configuration for the chainsaw swing-suppression task, logged to its own folder."""
+
+    experiment_name = "matrice_chainsaw_swing"
+
+
+@configclass
 class ChainsawToolPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
     """PPO configuration for the chainsaw tool-tracking task, with a stronger entropy bonus.
 
@@ -63,6 +84,8 @@ class ChainsawToolPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
     the same coefficient, levelled off near -15 with a flat error. rsl_rl has no lower bound on the
     std, so the bonus is raised instead.
     """
+
+    experiment_name = "matrice_chainsaw_tool"
 
     def __post_init__(self):
         super().__post_init__()
