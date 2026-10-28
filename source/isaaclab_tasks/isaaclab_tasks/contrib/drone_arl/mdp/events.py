@@ -445,6 +445,217 @@ def reset_swing_graded_by_env(
     )
 
 
+def _sample_swing_magnitude(
+    num: int, magnitude_range: tuple[float, float], zero_prob: float, device: str | torch.device
+) -> torch.Tensor:
+    """Sample a swing magnitude that is zero with probability :paramref:`zero_prob` and otherwise
+    log-uniform over :paramref:`magnitude_range`.
+
+    A log-uniform draw gives every scale the same weight, so a range spanning 1 to 40 deg is as likely
+    to produce a 1-3 deg swing as a 13-40 deg one. Drawing each hinge axis uniformly instead makes the
+    density of the magnitude fall to zero at zero (a swing under 10% of the range is a 1-in-100 draw on
+    two axes), so a policy trained on it comes to expect a large swing.
+
+    Args:
+        num: Number of samples.
+        magnitude_range: Smallest and largest non-zero magnitude. Both must be positive.
+        zero_prob: Probability of a zero magnitude.
+        device: Device to create the tensor on.
+
+    Returns:
+        A 1-D tensor of shape (num,) with the magnitudes.
+    """
+    magnitude = math_utils.sample_log_uniform(*magnitude_range, (num,), device)
+    return magnitude * (torch.rand(num, device=device) >= zero_prob)
+
+
+def _hinge_rest_offset(
+    env: ManagerBasedRLEnv, rest_term_name: str | None, env_ids: torch.Tensor
+) -> torch.Tensor | float:
+    """Hinge angles at which the payload hangs at rest, relative to the default joint angles [rad].
+
+    Read from a :class:`RandomizePayloadHangOffset` event term when :paramref:`rest_term_name` is set,
+    so the swing terms act about the randomized rest pose rather than about the nominal one.
+    """
+    if rest_term_name is None:
+        return 0.0
+    return env.event_manager.get_term_cfg(rest_term_name).func.rest_offset[env_ids]
+
+
+def reset_swing_by_amplitude(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    amplitude_range: tuple[float, float],
+    still_prob: float,
+    natural_frequency: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    rest_term_name: str | None = None,
+) -> None:
+    """Start a two-axis pendulum swinging with a random amplitude, direction and phase.
+
+    The amplitude is zero (hanging still) with probability :paramref:`still_prob` and otherwise
+    log-uniform over :paramref:`amplitude_range` (see :func:`_sample_swing_magnitude`), so every episode
+    is not one that starts with a large swing. The swing is planar, in a direction drawn uniformly, and
+    starts at a random phase of its cycle: with amplitude ``A``, phase ``psi`` and natural frequency
+    ``w`` the hinge angle is ``A cos(psi)`` and its rate ``-A w sin(psi)`` along that direction, so a
+    swing can start at its peak, through the bottom, or anywhere between. The swing is about the rest
+    pose, the default joint angles plus the offset of the :class:`RandomizePayloadHangOffset` term
+    named by :paramref:`rest_term_name`, if any. Angles are clamped to the soft joint limits.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to reset.
+        amplitude_range: Smallest and largest non-zero swing amplitude [rad]. Both must be positive.
+        still_prob: Probability of starting with no swing at all.
+        natural_frequency: Natural frequency of the pendulum, ``sqrt(g / L)`` for a point mass [rad/s].
+            Only sets how the swing energy is split between angle and rate at the sampled phase.
+        asset_cfg: SceneEntityCfg identifying the asset and exactly two hinge joints, outer axis first.
+        rest_term_name: Name of the :class:`RandomizePayloadHangOffset` event term that holds the rest
+            pose. None for the default joint angles.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    env_ids = resolve_env_ids(env_ids, env.num_envs, asset.device)
+    iter_env_ids = env_ids[:, None]
+    num = len(env_ids)
+
+    amplitude = _sample_swing_magnitude(num, amplitude_range, still_prob, asset.device)
+    direction = math_utils.sample_uniform(0.0, 2.0 * torch.pi, (num,), device=asset.device)
+    phase = math_utils.sample_uniform(0.0, 2.0 * torch.pi, (num,), device=asset.device)
+    axis = torch.stack([torch.cos(direction), torch.sin(direction)], dim=-1)
+
+    joint_pos = asset.data.default_joint_pos.torch[iter_env_ids, asset_cfg.joint_ids].clone()
+    joint_pos += _hinge_rest_offset(env, rest_term_name, env_ids)
+    joint_pos += (amplitude * torch.cos(phase)).unsqueeze(-1) * axis
+    joint_vel = (-amplitude * natural_frequency * torch.sin(phase)).unsqueeze(-1) * axis
+    joint_pos_limits = asset.data.soft_joint_pos_limits.torch[iter_env_ids, asset_cfg.joint_ids]
+    joint_pos = joint_pos.clamp_(joint_pos_limits[..., 0], joint_pos_limits[..., 1])
+
+    asset.write_joint_position_to_sim_index(position=joint_pos, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
+    asset.write_joint_velocity_to_sim_index(velocity=joint_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
+
+
+def push_swing_by_velocity(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    speed_range: tuple[float, float],
+    skip_prob: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Kick a two-axis pendulum by adding a hinge rate of random size and direction.
+
+    The same impulse as :func:`push_joints_by_velocity`, but with the size drawn like the swing of
+    :func:`reset_swing_by_amplitude`: no kick with probability :paramref:`skip_prob`, otherwise
+    log-uniform over :paramref:`speed_range`, in a direction drawn uniformly. Small knocks are then as
+    common as large ones, rather than the per-axis uniform draw's rare.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to push.
+        speed_range: Smallest and largest non-zero hinge rate added [rad/s]. Both must be positive. A
+            rate ``v`` adds a swing of about ``v / w`` [rad] to a pendulum at rest, with ``w`` its
+            natural frequency.
+        skip_prob: Probability that a kick is skipped.
+        asset_cfg: SceneEntityCfg identifying the asset and exactly two hinge joints, outer axis first.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    env_ids = resolve_env_ids(env_ids, env.num_envs, asset.device)
+    iter_env_ids = env_ids[:, None]
+    num = len(env_ids)
+
+    speed = _sample_swing_magnitude(num, speed_range, skip_prob, asset.device)
+    direction = math_utils.sample_uniform(0.0, 2.0 * torch.pi, (num,), device=asset.device)
+
+    joint_vel = asset.data.joint_vel.torch[iter_env_ids, asset_cfg.joint_ids].clone()
+    joint_vel[:, 0] += speed * torch.cos(direction)
+    joint_vel[:, 1] += speed * torch.sin(direction)
+    joint_vel_limits = asset.data.soft_joint_vel_limits.torch[iter_env_ids, asset_cfg.joint_ids]
+    joint_vel = joint_vel.clamp_(-joint_vel_limits, joint_vel_limits)
+    asset.write_joint_velocity_to_sim_index(velocity=joint_vel, joint_ids=asset_cfg.joint_ids, env_ids=env_ids)
+
+
+class RandomizePayloadHangOffset(ManagerTermBase):
+    """Make a hanging payload rest at a random hinge offset, by moving the COM of one of its bodies.
+
+    A real payload does not hang exactly where its hinge encoders read zero: the Mk3 chainsaw hangs at
+    about 5.4 deg forward and 3 deg right. A policy trained only on a payload that rests at zero reads
+    any non-zero hinge angle as swing. This term draws a rest offset per environment and moves the COM
+    of :paramref:`shifted_body` sideways so that the payload COM lies straight below the pivot at that
+    offset; the hinges then read the offset at rest, as the encoders would.
+
+    The shift is first order: with the vehicle level, ``+outer`` hinge moving the payload COM aft (-x)
+    and ``+inner`` moving it left (+y) of the airframe, a rest offset ``(a, b)`` needs the payload COM,
+    at zero hinge angles, ``L * (a, -b)`` further along the airframe x and y, with ``L`` the
+    pivot-to-COM distance. The residual tilt at the offset is at most about a tenth of a degree at the
+    offsets used here. The swing terms read :attr:`rest_offset` (see :func:`reset_swing_by_amplitude`).
+
+    It must run after any startup term that changes the payload mass, and with the vehicle at its
+    spawn pose and the hinges at their default angles, which is the state at startup. The COM write
+    goes through the CPU tensor API, so the term is meant for ``mode="startup"``.
+
+    The ``params`` of the term configuration are:
+
+    * ``asset_cfg``: SceneEntityCfg with exactly two hinge joints, outer axis first.
+    * ``payload_cfg``: SceneEntityCfg with every body below the pivot as ``body_names``.
+    * ``pivot_cfg``: SceneEntityCfg with the body whose link frame origin is the pivot.
+    * ``shifted_body_cfg``: SceneEntityCfg with the one payload body whose COM is moved.
+    * ``airframe_cfg``: SceneEntityCfg with the airframe body, whose x and y axes the signs above use.
+    * ``offset_range``: Range of the rest offset drawn uniformly for each hinge [rad].
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.rest_offset = torch.zeros(env.num_envs, 2, device=env.device)
+        """Hinge angles at which the payload rests, relative to the default angles [rad]. Shape (num_envs, 2)."""
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: torch.Tensor | None,
+        asset_cfg: SceneEntityCfg,
+        payload_cfg: SceneEntityCfg,
+        pivot_cfg: SceneEntityCfg,
+        shifted_body_cfg: SceneEntityCfg,
+        airframe_cfg: SceneEntityCfg,
+        offset_range: tuple[float, float],
+    ) -> None:
+        """Draw the rest offsets and write the shifted COMs.
+
+        Args:
+            env: The manager-based RL environment instance.
+            env_ids: Indices of the environments to randomize. All environments if None.
+        """
+        asset: Articulation = env.scene[asset_cfg.name]
+        env_ids = resolve_env_ids(env_ids, env.num_envs, asset.device)
+        data = asset.data
+        payload_ids = payload_cfg.body_ids
+        shifted_id: int = shifted_body_cfg.body_ids[0]  # type: ignore[index]
+
+        offset = math_utils.sample_uniform(*offset_range, (len(env_ids), 2), device=asset.device)
+        self.rest_offset[env_ids] = offset
+
+        mass = data.body_mass.torch[env_ids[:, None], payload_ids].to(asset.device)
+        com_w = torch.sum(mass.unsqueeze(-1) * data.body_com_pos_w.torch[env_ids[:, None], payload_ids], dim=1)
+        com_w = com_w / mass.sum(dim=1, keepdim=True)
+        length = torch.norm(com_w - data.body_link_pos_w.torch[env_ids, pivot_cfg.body_ids[0]], dim=-1)
+
+        # Payload COM shift in the airframe frame, then the shifted body's share of it in its own frame.
+        shift_a = torch.zeros(len(env_ids), 3, device=asset.device)
+        shift_a[:, 0] = length * offset[:, 0]
+        shift_a[:, 1] = -length * offset[:, 1]
+        shift_w = math_utils.quat_apply(data.body_link_quat_w.torch[env_ids, airframe_cfg.body_ids[0]], shift_a)
+        shifted_mass = data.body_mass.torch[env_ids, shifted_id].to(asset.device)
+        shift_w = shift_w * (mass.sum(dim=1) / shifted_mass).unsqueeze(-1)
+        shift_b = math_utils.quat_apply_inverse(data.body_link_quat_w.torch[env_ids, shifted_id], shift_w)
+
+        coms = data.body_com_pose_b.torch[env_ids, shifted_id].clone()
+        coms[:, :3] += shift_b
+        asset.set_coms_index(
+            coms=coms.unsqueeze(1),
+            body_ids=torch.tensor([shifted_id], dtype=torch.int, device=asset.device),
+            env_ids=env_ids.int(),
+        )
+
+
 class RandomizePassiveJointDamping(ManagerTermBase):
     """Scale the simulated damping of unactuated joints by a random factor per environment.
 

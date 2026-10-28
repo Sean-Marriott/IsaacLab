@@ -477,7 +477,8 @@ class PayloadSwingEnergy(ManagerTermBase):
     Because the reference is gravity, not the airframe, the quasi-static lean of the payload while
     the vehicle accelerates counts as swing too: a sustained horizontal acceleration ``a`` holds the
     payload at ``tan(theta) = a / g``, which costs ``m * g * L * (1 - cos(theta))`` for as long as it
-    lasts. This term therefore penalizes hard acceleration as well as free swinging.
+    lasts. This term therefore penalizes hard acceleration as well as free swinging, unless the swing is
+    measured against a known acceleration (see :meth:`swing_state`).
 
     The payload mass is read on the first call rather than at construction, so that it includes the
     startup randomization, which runs after the managers are created.
@@ -517,12 +518,23 @@ class PayloadSwingEnergy(ManagerTermBase):
         energy, _, _ = self.swing_state(env)
         return energy
 
-    def swing_state(self, env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def swing_state(
+        self, env: ManagerBasedRLEnv, accel_w: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute the swing energy together with the pendulum quantities it is measured against.
+
+        Args:
+            env: The manager-based RL environment instance.
+            accel_w: Acceleration of the pivot to measure the swing against, in the world frame
+                [m/s^2], shape (num_envs, 3). The payload then hangs at rest along the effective gravity
+                ``g - a`` rather than along gravity, so the lean that this acceleration holds it at is
+                not counted as swing; the potential term uses ``|g - a|`` in place of ``g``. None
+                measures against gravity alone.
 
         Returns:
             A tuple ``(energy, total_mass, length)``: the swing energy [J], the payload mass [kg] and
-            the pivot-to-COM distance [m], each of shape (num_envs,).
+            the pivot-to-COM distance [m], each of shape (num_envs,). With :paramref:`accel_w` set,
+            the energy is that of the swing about the leaning rest pose.
         """
         data = self._asset.data
         if self._mass is None:
@@ -537,10 +549,16 @@ class PayloadSwingEnergy(ManagerTermBase):
         vel_rel = com_vel_w - data.body_link_lin_vel_w.torch[:, self._pivot_id]
 
         length = torch.norm(offset, dim=-1)
-        cos_tilt = torch.sum(offset * self._down_w, dim=-1) / length.clamp_min(1e-6)
+        if accel_w is None:
+            gravity, down_w = self._gravity, self._down_w
+        else:
+            gravity_eff_w = self._gravity * self._down_w - accel_w
+            gravity = torch.norm(gravity_eff_w, dim=-1).clamp_min(1e-6)
+            down_w = gravity_eff_w / gravity.unsqueeze(-1)
+        cos_tilt = torch.sum(offset * down_w, dim=-1) / length.clamp_min(1e-6)
 
         kinetic = 0.5 * total_mass * torch.sum(vel_rel**2, dim=-1)
-        potential = total_mass * self._gravity * length * (1.0 - cos_tilt)
+        potential = total_mass * gravity * length * (1.0 - cos_tilt)
         return kinetic + potential, total_mass, length
 
     def swing_amplitude(self, env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor]:
@@ -581,8 +599,15 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
     * ``window_s``: If given, the reward is zero except during the last ``window_s`` seconds of the
       trajectory reference, as in :class:`ToolEndTargetExp` [s]. If ``None``, the default, it is
       active over the whole episode.
-    * ``command_name``: Name of the trajectory command term whose clock sets the window. Only used
-      when ``window_s`` is given.
+    * ``compensate_reference_accel``: If True, the swing is measured about the lean that the
+      trajectory reference's acceleration calls for, ``tan(theta) = a / g``, rather than about the
+      vertical (see :meth:`PayloadSwingEnergy.swing_state`). Following a moving reference then costs
+      nothing for the lean it needs, only for swing on top of it, so the term can stay active while
+      the reference moves. The reference acceleration is used rather than the measured one, so the
+      policy cannot hide a swing by accelerating the airframe along it. Defaults to False.
+    * ``command_name``: Name of the trajectory command term whose clock sets the window and whose
+      reference acceleration is compensated. Only used when ``window_s`` or
+      ``compensate_reference_accel`` is set.
     """
 
     def __call__(
@@ -593,6 +618,7 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
         energy_scale: float = 0.3,
         energy_deadzone: float = 0.0,
         window_s: float | None = None,
+        compensate_reference_accel: bool = False,
         command_name: str = "trajectory",
     ) -> torch.Tensor:
         """Compute the reward.
@@ -600,10 +626,10 @@ class PayloadSwingEnergyExp(PayloadSwingEnergy):
         Returns:
             A 1-D tensor of shape (num_envs,) with values in [0, 1].
         """
-        energy = super().__call__(env, payload_cfg, pivot_cfg)
+        cmd = env.command_manager.get_term(command_name) if window_s is not None or compensate_reference_accel else None
+        energy, _, _ = self.swing_state(env, cmd.acc_ref_w if compensate_reference_accel else None)
         reward = torch.exp(-(energy - energy_deadzone).clamp_min(0.0) / energy_scale)
         if window_s is not None:
-            cmd = env.command_manager.get_term(command_name)
             reward = reward * (cmd.ref_time >= cmd.episode_length_s - window_s)
         return reward
 

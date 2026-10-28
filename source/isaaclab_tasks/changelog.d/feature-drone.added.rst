@@ -76,3 +76,13 @@
 * Added the ``IsaacContrib-TrackPositionDirectVel-ARL-Robot-1``, ``IsaacContrib-TrackPositionDirectVel-Matrice``,
   ``IsaacContrib-SimpleLidarNavigation-ARL-Robot-1`` and ``IsaacContrib-SimpleLatentDepthNavigation-ARL-Robot-1``
   tasks.
+* Added the :func:`~isaaclab_tasks.contrib.drone_arl.mdp.events.reset_swing_by_amplitude` and
+  :func:`~isaaclab_tasks.contrib.drone_arl.mdp.events.push_swing_by_velocity` events, which start and
+  kick a payload swing with a log-uniform size and a share of no swing at all, and the
+  :class:`~isaaclab_tasks.contrib.drone_arl.mdp.events.RandomizePayloadHangOffset` event, which makes
+  a hanging payload rest at a random hinge offset.
+* Added the ``compensate_reference_accel`` parameter of
+  :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.PayloadSwingEnergyExp`, which measures the swing
+  about the lean that the trajectory reference's acceleration calls for.
+* Added the ``window_s`` parameter, and tracked-frame support through ``asset_cfg=None``, to
+  :class:`~isaaclab_tasks.contrib.drone_arl.mdp.terminations.PositionErrorAboveMaximumAfterCapture`.

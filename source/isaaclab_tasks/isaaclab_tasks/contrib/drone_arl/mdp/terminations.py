@@ -110,6 +110,11 @@ class PositionErrorAboveMaximumAfterCapture(ManagerTermBase):
     * ``command_name``: Name of the command to read the target position from, in the first three
       columns of the command tensor, in the environment-local world frame.
     * ``asset_cfg``: SceneEntityCfg identifying the asset, with ``body_ids`` selecting the body link.
+      None measures the frame tracked by the trajectory command instead (see its
+      ``tracked_frame_state``), such as a tool frame. Defaults to the robot, which needs ``body_ids``.
+    * ``window_s``: If given, the term is active, and can arm, only during the last ``window_s``
+      seconds of the trajectory reference, such as the hold at its end point [s]. Defaults to None,
+      active over the whole episode.
     """
 
     def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRLEnv):
@@ -127,17 +132,26 @@ class PositionErrorAboveMaximumAfterCapture(ManagerTermBase):
         max_error: float,
         capture_radius: float,
         command_name: str = "trajectory",
-        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        asset_cfg: SceneEntityCfg | None = SceneEntityCfg("robot"),
+        window_s: float | None = None,
     ) -> torch.Tensor:
         """Compute the termination.
 
         Returns:
             A boolean tensor of shape (num_envs,) that is True where the episode should terminate.
         """
-        asset: RigidObject = env.scene[asset_cfg.name]
-        command = env.command_manager.get_command(command_name)
-
-        current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
+        if asset_cfg is None:
+            command_term = env.command_manager.get_term(command_name)
+            current_position, _, _ = command_term.tracked_frame_state()
+            command = command_term.command
+        else:
+            asset: RigidObject = env.scene[asset_cfg.name]
+            command = env.command_manager.get_command(command_name)
+            current_position = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore
         error = torch.norm(command[:, :3] - current_position, dim=1)
-        self._armed |= error < capture_radius
-        return self._armed & (error > max_error)
+        active = error.new_ones(error.shape, dtype=torch.bool)
+        if window_s is not None:
+            cmd = env.command_manager.get_term(command_name)
+            active = cmd.ref_time >= cmd.episode_length_s - window_s
+        self._armed |= active & (error < capture_radius)
+        return self._armed & active & (error > max_error)
