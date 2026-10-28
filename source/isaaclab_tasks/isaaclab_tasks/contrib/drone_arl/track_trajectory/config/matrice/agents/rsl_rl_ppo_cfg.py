@@ -139,3 +139,21 @@ class ChainsawToolPPORunnerCfg(TrackTrajectoryPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.algorithm.entropy_coef = 0.005
+
+
+@configclass
+class ChainsawToolRNNPPORunnerCfg(ChainsawSwingRNNPPORunnerCfg):
+    """Recurrent PPO configuration for the chainsaw tool-tracking task, logged to its own folder.
+
+    The swing task's recurrent runner, for the same reason: leading the cutting mouth along the
+    reference means leading a pendulum whose damping, spring rate, mass and rest offset are randomized
+    and cannot be read from a single frame. The entropy bonus is that of :class:`ChainsawToolPPORunnerCfg`.
+
+    Select it with ``--agent rsl_rl_rnn_cfg_entry_point``.
+    """
+
+    experiment_name = "matrice_chainsaw_tool_rnn"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.entropy_coef = 0.005

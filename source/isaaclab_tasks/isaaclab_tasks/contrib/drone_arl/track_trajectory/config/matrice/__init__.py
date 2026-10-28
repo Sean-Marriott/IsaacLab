@@ -62,6 +62,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.chainsaw_tool_env_cfg:MatriceChainsawToolTrajectoryEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawToolPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawToolRNNPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )

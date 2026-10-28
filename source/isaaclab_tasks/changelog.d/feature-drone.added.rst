@@ -86,3 +86,4 @@
   about the lean that the trajectory reference's acceleration calls for.
 * Added the ``window_s`` parameter, and tracked-frame support through ``asset_cfg=None``, to
   :class:`~isaaclab_tasks.contrib.drone_arl.mdp.terminations.PositionErrorAboveMaximumAfterCapture`.
+* Added a recurrent PPO runner configuration for ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool``.
