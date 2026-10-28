@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import torch
 import warp as wp
 from isaaclab_physx.assets.articulation import Articulation
+from isaaclab_physx.assets.articulation.kernels import update_soft_joint_pos_limits
 from isaaclab_physx.assets.kernels import split_state_to_root_pose_and_vel
 
 import isaaclab.utils.string as string_utils
@@ -430,6 +431,17 @@ class Multirotor(Articulation):
         # solver limits are used as they are.
         wp.copy(self._data._soft_joint_vel_limits, self._data.joint_vel_limits.warp)
         self._data._soft_joint_vel_limits_ta = ProxyArray(self._data._soft_joint_vel_limits)
+
+        # Soft joint position limits. The parent computes these in ``_create_buffers``, but into the data
+        # container that ``_initialize_impl`` then replaces, so without this they are zero and every joint
+        # reset that clamps to them (e.g. ``reset_joints_by_offset``) writes the joint at zero.
+        wp.launch(
+            update_soft_joint_pos_limits,
+            dim=(self.num_instances, self.num_joints),
+            inputs=[self._data.joint_pos_limits, self.cfg.soft_joint_pos_limit_factor],
+            outputs=[self._data.soft_joint_pos_limits],
+            device=self.device,
+        )
 
         # Handle thruster-specific initial state
         if hasattr(self._data, "default_thruster_rps") and hasattr(self.cfg.init_state, "rps"):

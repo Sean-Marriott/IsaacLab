@@ -8,3 +8,6 @@
   the configured angle allows. Previously a large velocity error produced an arbitrarily large
   commanded tilt, bounded only by motor saturation, which made the action-to-acceleration map
   discontinuous once the vehicle started to flip.
+* Fixed :class:`~isaaclab_contrib.assets.Multirotor` leaving the soft joint position limits at zero,
+  which made joint reset events that clamp to them, such as
+  :func:`~isaaclab.envs.mdp.reset_joints_by_offset`, write every passive payload joint at zero.
