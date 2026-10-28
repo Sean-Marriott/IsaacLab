@@ -30,18 +30,24 @@ class MatriceCleanTrajectoryEnvCfg(TrackTrajectoryEnvCfg):
         #   K_angvel = 2 * 0.85 * sqrt(K_rot / I_att) * I_att      (zeta = 0.85)
         #   Yaw: K_rot_z = 0.4 * K_rot_xy, K_angvel_z from the same formula with I_zz
         #
-        # K_vel is *not* set to the attitude bandwidth omega_n = 12.84 rad/s, which is the 1:1
-        # cascade rule used for the chainsaw model. That rule only stays sane there because the
-        # pendulum inflates I_att to 2.65; on this airframe it would command 53 deg of tilt per m/s
-        # of velocity error. A 3.2:1 separation (tau_vel = 0.25 s) gives 12.84 / 3.2 = 4.0, which is
-        # 22 deg per m/s and matches typical PX4 tuning. The vertical axis has no attitude loop in
-        # the way, so it takes the same value rather than the usual 0.6 factor.
+        # Velocity gains are fitted to real M350 flights: the velocity command sent to the DJI flight
+        # controller against the fused ground velocity, over open-loop body-forward steps (no
+        # payload) and the spans of the chainsaw swing-suppression flights where the vehicle was
+        # following the offboard command (2026-10-28). The fit model was this controller's PI law
+        # behind the attitude loop above, with a pure command delay.
         #
-        # Ranges are +/-10 % around nominal and are resampled per environment on every reset.
+        # Laterally, delay and gain trade off: anything from 2.5 at no delay to 8.0 at 0.2 s fits
+        # within 3 % of the best, and both data sets put the best at about 4. The nominal stays at
+        # 4.0 (a 3.2:1 separation from the 12.84 rad/s attitude loop, 22 deg of tilt per m/s of
+        # error) and the range is widened to 3.0-5.5 to cover that ridge, since the delay itself is
+        # not modelled. Vertically the fit is sharp: 3.0 with a 0.1 s delay, against 4.0 with no
+        # delay before, which roughly halves the tracking error on the flights.
+        #
+        # Ranges are resampled per environment on every reset.
         ctrl = self.actions.velocity_command.controller_cfg
         ctrl.K_rot_range = ((115.0, 115.0, 46.0), (140.6, 140.6, 56.2))
         ctrl.K_angvel_range = ((15.2, 15.2, 11.1), (18.6, 18.6, 13.6))
-        ctrl.K_vel_range = ((3.6, 3.6, 3.6), (4.4, 4.4, 4.4))
+        ctrl.K_vel_range = ((3.0, 3.0, 2.7), (5.5, 5.5, 3.3))
 
         # Integral action on all three axes.
         #
@@ -60,18 +66,19 @@ class MatriceCleanTrajectoryEnvCfg(TrackTrajectoryEnvCfg):
         # relative to the 0.25 s velocity loop. Both leave a standing lateral error a proportional
         # loop cannot close.
         #
-        # Lateral gains are lower than the vertical one despite sharing K_vel = 4.0. The vertical
-        # integral acts on thrust directly, whereas x and y act through the attitude loop and pick
-        # up its lag. At 1.5 the velocity loop is s^2 + 4 s + 1.5 (zeta = 1.63, w_n = 1.22 rad/s),
-        # a tenth of the 12.84 rad/s attitude bandwidth -- overdamped and well separated. The
-        # vertical axis keeps 2.5, against the 4.0 that would be critically damped.
+        # The gain is small, though. On the flights above the fit got steadily worse as the integral
+        # grew, on every axis: over the 3-10 s spans available the vehicle shows no integral action
+        # it could be told apart from noise, and the previous 1.5 lateral / 2.5 vertical fitted the
+        # flights measurably worse than no integral at all. Values up to about 0.5-1.0 stay
+        # within the noise, so 0.5 keeps a slow station-holding term without contradicting the data.
+        # At 0.5 the velocity loop is s^2 + 4 s + 0.5 laterally and s^2 + 3 s + 0.5 vertically, both
+        # heavily overdamped, so the term trims a standing error over seconds rather than shaping
+        # the step response.
         #
         # Note that max_integral_acc (2.0 m/s^2, the default) is a single bound shared by all three
-        # axes, and it is sized for the vertical thrust shortfall. Laterally that is roughly 11 deg
-        # of tilt, far more than the 0.23 m/s^2 gust or the 0.10 m/s^2 peak drag needs. It bounds
-        # windup rather than shaping the response, so the slack is tolerable, but a lateral-only
-        # bound would be tighter if the term ever proves to overshoot.
-        ctrl.K_vel_int_range = ((1.35, 1.35, 2.25), (1.65, 1.65, 2.75))
+        # axes, and it is sized for the vertical thrust shortfall. It bounds windup rather than
+        # shaping the response, so the slack laterally is tolerable.
+        ctrl.K_vel_int_range = ((0.45, 0.45, 0.45), (0.55, 0.55, 0.55))
 
     def play_mode(self):
         """Evaluation overrides: few environments, no corruption, hardest reference."""
