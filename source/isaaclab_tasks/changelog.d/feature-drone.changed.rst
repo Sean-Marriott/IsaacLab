@@ -12,3 +12,6 @@
 * Changed the M350 trajectory tasks' Lee velocity gains to values fitted to real flight data: the
   lateral velocity gain range widens to 3.0-5.5, the vertical gain drops from 4.0 to 3.0, and the
   velocity integral gain drops to 0.5 on all axes (from 1.5 lateral and 2.5 vertical).
+* Changed ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool`` to delay the velocity command into
+  the controller by 0-150 ms, drawn per episode, to cover the command latency of the DJI flight
+  controller.

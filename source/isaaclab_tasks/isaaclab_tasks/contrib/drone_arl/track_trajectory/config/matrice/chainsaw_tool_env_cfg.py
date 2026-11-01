@@ -86,6 +86,12 @@ PLAY_SPEED_SCALE = 0.3
 """Factor on the reference's speed, acceleration and excursion in play mode. At 0.3 the hardest reference
 peaks at about 0.7 m/s and 0.9 m/s^2, against 2.25 m/s and 3.0 m/s^2 in training."""
 
+COMMAND_DELAY_RANGE_S = (0.0, 0.15)
+"""Range of the delay between the policy's velocity command and the controller acting on it [s].
+
+Drawn per environment on every reset; see ``command_delay_range_s`` on the velocity action.
+"""
+
 HANG_OFFSET_EVENT_NAME = "randomize_hang_offset"
 """Name of the event term that holds the randomized rest pose the swing terms act about."""
 
@@ -340,6 +346,14 @@ class MatriceChainsawToolTrajectoryEnvCfg(MatriceChainsawTrajectoryEnvCfg):
         # ChainsawToolEventCfg can then take a nonzero range, as the chainsaw task gives it.
         self.events.chainsaw_springs.params["stiffness"] = 1.0e4
         self.events.chainsaw_springs.params["scale_range"] = (1.0, 1.0)
+
+        # -- command latency
+        # The DJI flight controller acts on a velocity command about 0.05-0.1 s after it arrives
+        # (fitted from M350 flights; see the gain notes in env_cfg). A policy trained without that
+        # delay holds up at 50 ms but at 100 ms doubles its swing and rocks the airframe at 1-1.5 Hz,
+        # and at 150 ms it fails outright. The range covers the fitted delay with margin above it,
+        # and goes down to none so the policy does not come to rely on a fixed lag.
+        self.actions.velocity_command.command_delay_range_s = COMMAND_DELAY_RANGE_S
 
         # -- speed envelope
         # 1 m/s of velocity action, with the trajectory ranges scaled to match: the hardest reference
