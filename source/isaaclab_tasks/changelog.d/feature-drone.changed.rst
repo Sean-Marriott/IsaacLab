@@ -18,3 +18,6 @@
 * Changed ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool`` to give a quarter of the environments
   fresh measured observations and to penalize the second difference of the action, against a 5 Hz
   rocking of the airframe seen with fresh observations or a stiffer velocity loop.
+* Changed ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool`` to train on reference speed,
+  acceleration and excursion ranges scaled to 0.4 of the defaults (0.9 m/s and 1.2 m/s^2 at the hard
+  end), near the deployed speeds, with the 3 m/s action range unchanged. Play mode still flies 0.3.

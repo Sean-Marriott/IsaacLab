@@ -85,8 +85,21 @@ SWING_NATURAL_FREQUENCY = 3.0
 """Natural frequency of the payload swing about the tube hinge [rad/s] (a ~2.1 s period on the Mk3)."""
 
 PLAY_SPEED_SCALE = 0.3
-"""Factor on the reference's speed, acceleration and excursion in play mode. At 0.3 the hardest reference
-peaks at about 0.7 m/s and 0.9 m/s^2, against 2.25 m/s and 3.0 m/s^2 in training."""
+"""Factor on the reference's speed, acceleration and excursion in play mode, relative to the default
+trajectory ranges. At 0.3 the hardest reference peaks at about 0.7 m/s and 0.9 m/s^2, the speeds flown
+on the real vehicle."""
+
+TRAIN_SPEED_SCALE = 0.4
+"""Factor on the reference's speed, acceleration and excursion in training, relative to the default
+trajectory ranges. At 0.4 the hardest reference peaks at 0.9 m/s and 1.2 m/s^2, a third above the
+deployed speeds of :data:`PLAY_SPEED_SCALE`.
+
+The full ranges (2.25 m/s and 3.0 m/s^2) are about three times what is flown. On them the mouth arrives
+at the end point still swinging from the last manoeuvre, and after the difficulty ramp the end-of-hold
+tool error grew from 4.6 to 7.6 cm (2026-10-27 RNN run), so the policy spent its effort leading the
+pendulum through references it never flies rather than on the end pose. Must be at least
+:data:`PLAY_SPEED_SCALE`.
+"""
 
 FRESH_OBS_ENV_FRACTION = 0.25
 """Fraction of environments whose measured observations are always fresh: no lag and no held frames.
@@ -118,6 +131,23 @@ those change.
 
 CHAINSAW_TOOL_FRAME = DroneTrajectoryCommandCfg.OffsetCfg(pos=CHAINSAW_MOUTH_OFFSET, rot=CHAINSAW_TOOL_ROT)
 """The tracked tool frame: on the cutting mouth, lined up with the vehicle yaw frame at rest."""
+
+
+def scale_reference_envelope(command: DroneTrajectoryCommandCfg, factor: float):
+    """Scale the reference's speed, acceleration and excursion, leaving the action range alone.
+
+    Unlike :func:`set_speed_envelope`, this leaves ``max_velocity`` alone: it sets the action scale,
+    so checkpoints keep their meaning, and the policy keeps the authority to recover from a kick. As
+    there, ``omega_max`` is not scaled, so the paths keep their shape and timescale and only shrink.
+
+    Args:
+        command: The trajectory command configuration to modify in place.
+        factor: Factor on the current ranges.
+    """
+    ranges = command.ranges
+    scaled = ("vel_rms_target", "pos_cap", "vel_cap", "acc_cap", "pos_z_cap", "vel_z_cap", "acc_z_cap")
+    # Build a new Ranges rather than mutating in place: it may be a shared module-level instance.
+    command.ranges = ranges.replace(**{name: tuple(v * factor for v in getattr(ranges, name)) for name in scaled})
 
 
 @configclass
@@ -388,9 +418,9 @@ class MatriceChainsawToolTrajectoryEnvCfg(MatriceChainsawTrajectoryEnvCfg):
         self.actions.velocity_command.command_delay_range_s = COMMAND_DELAY_RANGE_S
 
         # -- speed envelope
-        # 1 m/s of velocity action, with the trajectory ranges scaled to match: the hardest reference
-        # peaks at 0.75 m/s and 1.0 m/s^2. Last, so it scales whatever ranges are in place by now.
-        # set_speed_envelope(self, 1.0)
+        # The reference near the deployed speeds; see TRAIN_SPEED_SCALE. The action range stays at
+        # 3 m/s. Last, so it scales whatever ranges are in place by now.
+        scale_reference_envelope(self.commands.trajectory, TRAIN_SPEED_SCALE)
 
     def play_mode(self):
         """Evaluation overrides: as for :class:`MatriceChainsawTrajectoryEnvCfg`, with regular kicks."""
@@ -401,12 +431,6 @@ class MatriceChainsawToolTrajectoryEnvCfg(MatriceChainsawTrajectoryEnvCfg):
         self.events.kick_chainsaw_swing.params["skip_prob"] = 0.0
 
         # -- slow reference
-        # Scale the reference's speed, acceleration and excursion by PLAY_SPEED_SCALE, as
-        # set_speed_envelope does, but leave max_velocity alone: it sets the action scale the policy
-        # was trained with. omega_max is not scaled, so the paths keep their shape and timescale and
-        # only shrink. Set PLAY_SPEED_SCALE to 1.0 for the full training envelope.
-        ranges = self.commands.trajectory.ranges
-        scaled = ("vel_rms_target", "pos_cap", "vel_cap", "acc_cap", "pos_z_cap", "vel_z_cap", "acc_z_cap")
-        self.commands.trajectory.ranges = ranges.replace(
-            **{name: tuple(v * PLAY_SPEED_SCALE for v in getattr(ranges, name)) for name in scaled}
-        )
+        # The ranges are already at TRAIN_SPEED_SCALE; bring them to PLAY_SPEED_SCALE. Set
+        # PLAY_SPEED_SCALE to TRAIN_SPEED_SCALE to evaluate on the training envelope.
+        scale_reference_envelope(self.commands.trajectory, PLAY_SPEED_SCALE / TRAIN_SPEED_SCALE)
