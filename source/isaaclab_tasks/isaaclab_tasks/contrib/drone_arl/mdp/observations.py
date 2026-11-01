@@ -20,6 +20,8 @@ import isaaclab.utils.math as math_utils
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.images import normalize_depth
 
+from .utils import hanging_tool_and_end_target
+
 # ``source/isaaclab_tasks/data``, which ships the drone ARL VAE weights
 _ISAACLAB_TASKS_DATA_DIR = os.path.join(os.path.dirname(__file__), *([os.pardir] * 4), "data")
 
@@ -568,3 +570,87 @@ def trajectory_lookahead_v(
     lookahead_w = command_term.command[:, 11:].reshape(env.num_envs, -1, 3) - position_w.unsqueeze(1)
     vehicle_quat = _vehicle_frame_quat(asset).unsqueeze(1).expand(-1, lookahead_w.shape[1], -1)
     return math_utils.quat_apply_inverse(vehicle_quat, lookahead_w).flatten(start_dim=1)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_time_to_go(env: ManagerBasedRLEnv, command_name: str, horizon_s: float) -> torch.Tensor:
+    """Time left until the reference reaches its end point, clipped to a horizon and normalized.
+
+    It reads 1 while the end point is more than ``horizon_s`` away, ramps down to 0 on arrival and stays
+    at 0 for the whole hold (see
+    :meth:`~isaaclab_tasks.contrib.drone_arl.mdp.commands.DroneTrajectoryCommand.time_to_end_point`), so
+    the policy can prepare the arrival without learning when the episode times out. A planner on the
+    vehicle knows its own timing, so it can supply the same signal.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        horizon_s: Time to go beyond which the observation saturates at 1 [s].
+
+    Returns:
+        The normalized time to go, in [0, 1]. Shape is (num_envs, 1).
+    """
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    return torch.clamp(command_term.time_to_end_point() / horizon_s, max=1.0).unsqueeze(-1)
+
+
+class ToolEndTargetError(ManagerTermBase):
+    """Error of a hanging tool to its target at the trajectory end point, in the vehicle frame.
+
+    The target is the one rewarded by :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolEndTargetExp`:
+    where the tool would be if the vehicle sat level at the end point with the payload hanging at rest.
+    It is observed over the whole episode, not only when that reward is active, so the policy can see
+    where the tool has to go before it gets there.
+
+    The ``params`` of the term configuration are:
+
+    * ``asset_cfg``: SceneEntityCfg identifying the tool body. Must have ``body_names`` configured.
+    * ``tool_offset``: Tool point in the tool body frame [m].
+    * ``hang_offset``: Tool point relative to the tracked body when the payload hangs at rest below a
+      level vehicle, in the yaw-aligned vehicle frame [m].
+    * ``tool_rot``: Orientation of the tool frame in the tool body frame, as a quaternion (x, y, z, w),
+      chosen so that the tool frame lines up with the vehicle yaw frame at rest. It sets the tool yaw.
+    * ``command_name``: Name of the trajectory command term to read the end pose from.
+
+    Returns a tensor of shape (num_envs, 4): the target minus the tool position [m] in the yaw-only
+    vehicle frame, and the end yaw minus the tool yaw [rad], wrapped to (-pi, pi].
+    """
+
+    def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        asset_cfg.resolve(env.scene)
+        self._asset: Articulation = env.scene[asset_cfg.name]
+        self._body_id: int = asset_cfg.body_ids[0]  # type: ignore[index]
+        self._command_term: DroneTrajectoryCommand = env.command_manager.get_term(cfg.params["command_name"])
+        self._tool_b = torch.tensor(cfg.params["tool_offset"], device=env.device).expand(env.num_envs, 3)
+        self._hang_v = torch.tensor(cfg.params["hang_offset"], device=env.device).expand(env.num_envs, 3)
+        self._tool_rot_b = torch.tensor(cfg.params["tool_rot"], device=env.device).expand(env.num_envs, 4)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        tool_offset: tuple[float, float, float],
+        hang_offset: tuple[float, float, float],
+        tool_rot: tuple[float, float, float, float],
+        command_name: str,
+    ) -> torch.Tensor:
+        """Compute the observation.
+
+        Returns:
+            The position and yaw error of the tool to its end target. Shape is (num_envs, 4).
+        """
+        tool_pos, tool_quat, target_pos, _ = hanging_tool_and_end_target(
+            self._asset,
+            self._body_id,
+            self._tool_b,
+            self._tool_rot_b,
+            self._hang_v,
+            self._command_term,
+            env.scene.env_origins,
+        )
+        pos_error_v = math_utils.quat_apply_inverse(_vehicle_frame_quat(self._asset), target_pos - tool_pos)
+        _, _, tool_yaw = math_utils.euler_xyz_from_quat(tool_quat)
+        yaw_error = math_utils.wrap_to_pi(self._command_term.yaw_end - tool_yaw)
+        return torch.cat([pos_error_v, yaw_error.unsqueeze(-1)], dim=-1)

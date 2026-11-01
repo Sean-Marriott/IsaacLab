@@ -507,6 +507,19 @@ class DroneTrajectoryCommand(CommandTerm):
         lin_vel_w = data.body_link_lin_vel_w.torch[:, self.body_idx] + torch.cross(ang_vel_w, offset_w, dim=-1)
         return pos_w, math_utils.quat_mul(body_quat, self._offset_rot), lin_vel_w
 
+    def time_to_end_point(self) -> torch.Tensor:
+        """Return the time left until the reference reaches its end point and starts the hold.
+
+        It counts down through the slowdown and is zero for the whole of the hold, so it does not
+        reveal when the episode will time out. Without :attr:`DroneTrajectoryCommandCfg.end_hold_s`,
+        the end point is reached at the episode end.
+
+        Returns:
+            The time to the end point [s], shape ``(num_envs,)``.
+        """
+        arrival_time = self.episode_length_s - self.cfg.end_hold_s
+        return torch.clamp(arrival_time - self.ref_time, min=0.0)
+
     def sample_parameters(self, env_ids: Sequence[int] | torch.Tensor):
         """Draw a new trajectory for the given environments.
 

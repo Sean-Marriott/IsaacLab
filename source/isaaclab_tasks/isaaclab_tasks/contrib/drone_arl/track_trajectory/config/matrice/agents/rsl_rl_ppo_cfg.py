@@ -157,3 +157,20 @@ class ChainsawToolRNNPPORunnerCfg(ChainsawSwingRNNPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.algorithm.entropy_coef = 0.005
+
+
+@configclass
+class ChainsawDroneRefPPORunnerCfg(ChainsawToolPPORunnerCfg):
+    """PPO configuration for the chainsaw task on the drone reference, logged to its own folder."""
+
+    experiment_name = "matrice_chainsaw_drone_ref"
+
+
+@configclass
+class ChainsawDroneRefRNNPPORunnerCfg(ChainsawToolRNNPPORunnerCfg):
+    """Recurrent PPO configuration for the chainsaw task on the drone reference, logged to its own folder.
+
+    Select it with ``--agent rsl_rl_rnn_cfg_entry_point``.
+    """
+
+    experiment_name = "matrice_chainsaw_drone_ref_rnn"

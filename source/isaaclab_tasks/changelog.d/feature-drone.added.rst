@@ -92,3 +92,13 @@
   fraction of the environments the minimum lag with no held frames, the same ones for every term.
 * Added the :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ActionSecondDifferenceL2` reward, which
   penalizes an action that flips sign every policy step without resisting held or ramping commands.
+* Added ``IsaacContrib-TrackTrajectory-Matrice-ChainsawDroneRef``, the chainsaw tool task with the
+  trajectory reference tracked by the drone, as it is planned on the vehicle, and the cutting mouth
+  rewarded for reaching its hanging target below the end point, with PPO and recurrent PPO runners.
+  Its policy also observes the mouth's error to that target and the time to go until the end point,
+  and the fine airframe position tracking is off during the end hold.
+* Added the :class:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.ToolEndTargetError` and
+  :func:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.trajectory_time_to_go` observations,
+  :meth:`~isaaclab_tasks.contrib.drone_arl.mdp.commands.DroneTrajectoryCommand.time_to_end_point`, and
+  the ``exclude_end_s`` parameter of :func:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.position_tracking_exp`,
+  which turns the reward off for the end of the reference.

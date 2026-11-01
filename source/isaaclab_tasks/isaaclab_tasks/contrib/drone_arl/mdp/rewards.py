@@ -19,6 +19,7 @@ from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 
 from .curriculums import get_obstacle_curriculum_term
+from .utils import hanging_tool_and_end_target
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, RigidObject
@@ -640,7 +641,9 @@ Trajectory tracking rewards.
 """
 
 
-def position_tracking_exp(env: ManagerBasedRLEnv, std: float = 1.0, command_name: str = "trajectory") -> torch.Tensor:
+def position_tracking_exp(
+    env: ManagerBasedRLEnv, std: float = 1.0, command_name: str = "trajectory", exclude_end_s: float | None = None
+) -> torch.Tensor:
     """Reward matching the reference position using an exponential kernel.
 
     Unlike :func:`distance_to_goal_exp`, which compares a named body with any position command,
@@ -652,15 +655,21 @@ def position_tracking_exp(env: ManagerBasedRLEnv, std: float = 1.0, command_name
         std: Standard deviation used in the exponential kernel [m]; larger values produce a
             gentler falloff.
         command_name: Name of the trajectory command to read the reference position from.
+        exclude_end_s: If given, the reward is zero during the last ``exclude_end_s`` seconds of the
+            reference, such as the hold at its end point, so that another term can place the vehicle
+            there [s]. Defaults to None, active over the whole episode.
 
     Returns:
-        A 1-D tensor of shape (num_envs,) with values in (0, 1], where 1 indicates an exact match.
+        A 1-D tensor of shape (num_envs,) with values in [0, 1], where 1 indicates an exact match.
     """
     command_term = env.command_manager.get_term(command_name)
     pos_w, _, _ = command_term.tracked_frame_state()
 
     position_error_square = torch.sum(torch.square(command_term.command[:, :3] - pos_w), dim=1)
-    return torch.exp(-position_error_square / std**2)
+    reward = torch.exp(-position_error_square / std**2)
+    if exclude_end_s is not None:
+        reward = reward * (command_term.ref_time < command_term.episode_length_s - exclude_end_s)
+    return reward
 
 
 def velocity_tracking_exp(env: ManagerBasedRLEnv, std: float = 1.0, command_name: str = "trajectory") -> torch.Tensor:
@@ -849,16 +858,15 @@ class ToolEndTargetExp(ManagerTermBase):
             orientation is that of the tool body, rotated by ``tool_rot`` when it is set; the target
             orientation is the end yaw.
         """
-        body_pos = self._asset.data.body_pos_w.torch[:, self._body_id] - self._env.scene.env_origins
-        body_quat = self._asset.data.body_quat_w.torch[:, self._body_id]
-        tool_pos = body_pos + math_utils.quat_apply(body_quat, self._tool_b)
-        tool_quat = body_quat if self._tool_rot_b is None else math_utils.quat_mul(body_quat, self._tool_rot_b)
-
-        cmd = self._command_term
-        zeros = torch.zeros_like(cmd.yaw_end)
-        end_yaw_quat = math_utils.quat_from_euler_xyz(zeros, zeros, cmd.yaw_end)
-        target = cmd.pos_end_w + math_utils.quat_apply(end_yaw_quat, self._target_v)
-        return tool_pos, tool_quat, target, end_yaw_quat
+        return hanging_tool_and_end_target(
+            self._asset,
+            self._body_id,
+            self._tool_b,
+            self._tool_rot_b,
+            self._target_v,
+            self._command_term,
+            self._env.scene.env_origins,
+        )
 
     def _debug_vis_callback(self, event):
         # note: needed in case the robot is de-initialized, since its data cannot be accessed then
