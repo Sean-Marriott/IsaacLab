@@ -101,6 +101,7 @@ Custom drone environments are under `source/isaaclab_tasks/isaaclab_tasks/contri
 | `navigation/` | Navigation with floating obstacles |
 | `simple_navigation/` | Lightweight navigation; variants: lidar (`simple_lidar_navigation_env_cfg.py`) and depth-latent (`simple_depth_latent_navigation_env_cfg.py`) |
 | `track_trajectory/` | M350 trajectory following, incl. chainsaw payload, tool tracking and swing suppression (`config/matrice/`) |
+| `chainsaw_align/` | Standalone base task: fly the Mk3 chainsaw mouth onto a target pose (`IsaacContrib-ChainsawAlign-Matrice`); own `mdp/`, no trajectory dependencies |
 
 ### Robot configurations
 

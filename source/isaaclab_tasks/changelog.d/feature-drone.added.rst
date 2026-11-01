@@ -136,3 +136,17 @@
   tip that keeps the approach cone at least that wide near the target, drawn as a cylinder along the cone. The cone
   is now bounded along its axis at ``capture_radius`` rather than by distance, and ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign``
   uses a tip as wide as its tolerance ball.
+* Added ``IsaacContrib-ChainsawAlign-Matrice``, a standalone task in which the M350 flies the Mk3 chainsaw's
+  cutting mouth onto a target position and yaw through the Lee velocity controller, arriving from behind
+  along the target's approach axis, with no trajectory reference. It has PPO and recurrent PPO runners.
+  Its MDP terms live in ``isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp``:
+  :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.ToolPoseCommand`, a staged approach of a tool
+  frame through a staging point to its target that logs the arrival angle and a direction-aware success rate;
+  route-length and cross-track rewards; the
+  :func:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.reset_tool_around_target` spawn event; the
+  :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.SuccessDifficultyCurriculum`, which raises a
+  difficulty level with the success rate and ramps event parameters with it, widening the spawn around the
+  target and then bringing in the :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.RandomWind`
+  gusts; and
+  :func:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.lock_passive_joints`, which locks the saw-head
+  pivot at its rest pose.
