@@ -19,6 +19,7 @@ from isaaclab_physx.assets.articulation.kernels import update_soft_joint_pos_lim
 from isaaclab_physx.assets.kernels import split_state_to_root_pose_and_vel
 
 import isaaclab.utils.string as string_utils
+from isaaclab.assets.articulation import ordering_kernels
 from isaaclab.utils import instantiate
 from isaaclab.utils.warp import ProxyArray
 
@@ -288,7 +289,9 @@ class Multirotor(Articulation):
            thruster forces into a combined 6D wrench (force + torque) vector.
 
         3. **Apply to simulation**: Apply the combined wrench to the base link of the multirotor
-           in the PhysX simulation.
+           in the PhysX simulation, together with any external wrenches written to
+           :attr:`instantaneous_wrench_composer` or :attr:`permanent_wrench_composer` (for example
+           by wind, drag or push events).
 
         This method should be called after setting thrust targets with :meth:`set_thrust_target`
         and before stepping the simulation.
@@ -344,6 +347,9 @@ class Multirotor(Articulation):
         # internal force/torque targets per body for combined mode
         self._internal_force_target_sim = torch.zeros(num_instances, self.num_bodies, 3, device=self.device)
         self._internal_torque_target_sim = torch.zeros(num_instances, self.num_bodies, 3, device=self.device)
+        # public index of the root link (backend body 0), which the thrust wrench acts on
+        ordering = self.data.body_ordering
+        self._root_body_public_index = ordering.backend_to_user_indices[0] if ordering is not None else 0
 
         # Placeholder thruster names (will be filled during actuator creation)
         self._data.thruster_names = [f"thruster_{i}" for i in range(num_thrusters)]
@@ -567,11 +573,17 @@ class Multirotor(Articulation):
             self._data.applied_thrust[:, actuator.thruster_indices] = actuator.applied_thrust
 
     def _apply_combined_wrench(self):
-        """Apply combined wrench to the base link.
+        """Apply the thrust wrench to the base link, together with any external wrenches.
 
         This internal method applies the 6D wrench (computed by :meth:`_combine_thrusts`)
-        to the base link of the multirotor. The wrench is applied at the center of mass
-        of the base link in the local body frame.
+        to the base link of the multirotor, at the center of mass of the base link in the
+        local body frame.
+
+        The base class applies the external wrenches of :attr:`instantaneous_wrench_composer` and
+        :attr:`permanent_wrench_composer` in its :meth:`write_data_to_sim`, which this class replaces.
+        The thrust is therefore added to the instantaneous composer as a body-frame wrench, the
+        permanent wrenches are folded in, and the composed result is applied in a single call, so
+        external forces such as wind, drag or pushes act on the vehicle alongside the thrust.
 
         The forces and torques are applied through PhysX's force/torque API, which integrates
         them during the physics step to produce accelerations and velocities.
@@ -579,17 +591,38 @@ class Multirotor(Articulation):
         # Combine individual thrusts into a wrench vector
         self._combine_thrusts()
 
-        # Convert torch tensors to Warp arrays for PhysX API
-        force_data_wp = wp.from_torch(self._internal_force_target_sim.view(-1, 3), dtype=wp.float32)
-        torque_data_wp = wp.from_torch(self._internal_torque_target_sim.view(-1, 3), dtype=wp.float32)
+        composer = self._instantaneous_wrench_composer
+        if self._permanent_wrench_composer.active:
+            composer.add_raw_buffers_from(self._permanent_wrench_composer)
+        # The thrust acts on the root link, which is backend body 0 (where _combine_thrusts stores it); the
+        # composer is indexed in public body order.
+        composer.add_forces_and_torques_index(
+            forces=self._internal_force_target_sim[:, 0:1].contiguous(),
+            torques=self._internal_torque_target_sim[:, 0:1].contiguous(),
+            body_ids=[self._root_body_public_index],
+        )
 
+        force_user, torque_user, is_global = composer.get_forces_and_torques()
+        if self.data.has_body_ordering:
+            wp.launch(
+                ordering_kernels.reorder_body_wrench_user_to_backend,
+                dim=(self.num_instances, self.num_bodies),
+                inputs=[force_user, torque_user, self.data.body_ordering.backend_to_user],
+                outputs=[self._body_wrench_force_backend, self._body_wrench_torque_backend],
+                device=self.device,
+            )
+            force_data, torque_data = self._body_wrench_force_backend, self._body_wrench_torque_backend
+        else:
+            force_data, torque_data = force_user, torque_user
         self.root_view.apply_forces_and_torques_at_position(
-            force_data=force_data_wp,  # Shape: (num_envs * num_bodies, 3)
-            torque_data=torque_data_wp,  # Shape: (num_envs * num_bodies, 3)
+            force_data=force_data.flatten().view(wp.float32),  # Shape: (num_envs * num_bodies, 3)
+            torque_data=torque_data.flatten().view(wp.float32),  # Shape: (num_envs * num_bodies, 3)
             position_data=None,  # Apply at center of mass
             indices=self._ALL_INDICES,
-            is_global=False,  # Forces are in local frame
+            is_global=is_global,
         )
+        # The instantaneous wrenches (now including the thrust) last for one step only.
+        composer.reset()
 
     def _combine_thrusts(self):
         """Combine individual thrusts into a wrench vector.
