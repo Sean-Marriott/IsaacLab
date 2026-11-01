@@ -397,13 +397,44 @@ class DirectVelocityAction(NavigationAction):
 
     This lets the policy discover the coupling between translational axes itself,
     rather than having it encoded into the action parameterisation.
+
+    When :attr:`~thrust_actions_cfg.DirectVelocityActionCfg.command_delay_range_s` is non-zero, the
+    setpoint reaches the controller late by a per-environment delay drawn on every reset. The
+    setpoints of the last physics steps are kept in a ring buffer, refilled with the current
+    setpoint on the first physics step of an episode so that nothing carries over from the last one.
     """
 
     cfg: thrust_actions_cfg.DirectVelocityActionCfg
 
+    def __init__(self, cfg: thrust_actions_cfg.DirectVelocityActionCfg, env: ManagerBasedEnv) -> None:
+        super().__init__(cfg, env)
+
+        delay_min, delay_max = self.cfg.command_delay_range_s
+        if not 0.0 <= delay_min <= delay_max:
+            raise ValueError(
+                f"command_delay_range_s must satisfy 0 <= min <= max, got {self.cfg.command_delay_range_s}."
+            )
+        self._physics_dt = env.physics_dt
+        max_delay_steps = round(delay_max / self._physics_dt)
+        self._delay_enabled = max_delay_steps > 0
+        if self._delay_enabled:
+            self._setpoint_history = torch.zeros(max_delay_steps + 1, self.num_envs, 4, device=self.device)
+            self._history_head = 0
+            self._delay_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            # Environments whose history is refilled with the current setpoint on the next physics step.
+            self._history_stale = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+            self._env_ids_all = torch.arange(self.num_envs, device=self.device)
+
     @property
     def action_dim(self) -> int:
         return 4
+
+    @property
+    def command_delay_s(self) -> torch.Tensor:
+        """Delay of the setpoint into the controller in each environment [s]. Shape is (num_envs,)."""
+        if not self._delay_enabled:
+            return torch.zeros(self.num_envs, device=self.device)
+        return self._delay_steps * self._physics_dt
 
     def apply_actions(self):
         clamped = torch.clamp(self.processed_actions, min=-1.0, max=1.0)
@@ -414,11 +445,35 @@ class DirectVelocityAction(NavigationAction):
         processed_actions[:, 2] = clamped[:, 2] * self.cfg.max_velocity
         processed_actions[:, 3] = clamped[:, 3] * self.cfg.max_yaw_rate
 
+        # The observations report the setpoint as sent, not as the controller receives it.
         if not self._has_actions_updated:
             self._prev_commands[:] = self._commands
             self._commands[:] = processed_actions
             self._has_actions_updated = True
 
-        wrench_command = self._lc.compute(processed_actions)
+        setpoint = self._delay_setpoint(processed_actions) if self._delay_enabled else processed_actions
+        wrench_command = self._lc.compute(setpoint)
         thrust_commands = wrench_command @ self._allocation_pinv.T
         self._asset.set_thrust_target(thrust_commands, thruster_ids=self._thruster_ids)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        super().reset(env_ids)
+        if not self._delay_enabled:
+            return
+        if env_ids is None:
+            env_ids = slice(None)
+        num = self.num_envs if isinstance(env_ids, slice) else len(env_ids)
+        delay_min, delay_max = self.cfg.command_delay_range_s
+        delay_s = torch.empty(num, device=self.device).uniform_(delay_min, delay_max)
+        self._delay_steps[env_ids] = torch.round(delay_s / self._physics_dt).long()
+        self._history_stale[env_ids] = True
+
+    def _delay_setpoint(self, setpoint: torch.Tensor) -> torch.Tensor:
+        """Push the current setpoint into the history and return each environment's delayed one."""
+        history_len = self._setpoint_history.shape[0]
+        self._history_head = (self._history_head + 1) % history_len
+        self._setpoint_history[self._history_head] = setpoint
+        self._setpoint_history[:, self._history_stale] = setpoint[self._history_stale]
+        self._history_stale[:] = False
+        slots = (self._history_head - self._delay_steps) % history_len
+        return self._setpoint_history[slots, self._env_ids_all]

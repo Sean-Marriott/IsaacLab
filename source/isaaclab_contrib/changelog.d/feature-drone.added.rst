@@ -1,6 +1,9 @@
 * Added :class:`~isaaclab_contrib.mdp.DirectVelocityAction` and
   :class:`~isaaclab_contrib.mdp.DirectVelocityActionCfg`, which pass body-frame velocity and yaw-rate
   commands straight to the Lee velocity controller.
+* Added ``DirectVelocityActionCfg.command_delay_range_s``, a per-environment delay between the
+  policy's setpoint and the Lee velocity controller acting on it, drawn on every reset and resolved
+  to the physics step. It models flight-controller command latency. The default is no delay.
 * Added optional integral action to :class:`~isaaclab_contrib.controllers.LeeVelController`, via
   ``LeeVelControllerCfg.K_vel_int_range`` and ``LeeVelControllerCfg.max_integral_acc``. The gain is
   zero on every axis by default, so the controller stays purely proportional unless it is enabled.

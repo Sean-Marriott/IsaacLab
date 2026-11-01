@@ -234,3 +234,13 @@ class DirectVelocityActionCfg(ThrustActionCfg):
 
     max_yaw_rate: float = MISSING
     """Maximum yaw rate command [rad/s]."""
+
+    command_delay_range_s: tuple[float, float] = (0.0, 0.0)
+    """Range of the delay between the policy's setpoint and the controller receiving it [s].
+
+    A delay is drawn uniformly from this range for each environment on every reset and rounded to
+    whole physics steps, so delays shorter than a policy step are represented. The controller then
+    tracks the setpoint sent that long ago, which models the latency of a flight controller between
+    a velocity command arriving and it acting on it. The command observations still report the
+    setpoint as sent. Defaults to no delay.
+    """
