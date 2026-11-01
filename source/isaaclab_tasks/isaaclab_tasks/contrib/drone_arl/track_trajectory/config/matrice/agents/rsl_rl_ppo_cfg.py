@@ -174,3 +174,20 @@ class ChainsawDroneRefRNNPPORunnerCfg(ChainsawToolRNNPPORunnerCfg):
     """
 
     experiment_name = "matrice_chainsaw_drone_ref_rnn"
+
+
+@configclass
+class ChainsawAlignPPORunnerCfg(ChainsawToolPPORunnerCfg):
+    """PPO configuration for the chainsaw mouth alignment task, logged to its own folder."""
+
+    experiment_name = "matrice_chainsaw_align"
+
+
+@configclass
+class ChainsawAlignRNNPPORunnerCfg(ChainsawToolRNNPPORunnerCfg):
+    """Recurrent PPO configuration for the chainsaw mouth alignment task, logged to its own folder.
+
+    Select it with ``--agent rsl_rl_rnn_cfg_entry_point``.
+    """
+
+    experiment_name = "matrice_chainsaw_align_rnn"

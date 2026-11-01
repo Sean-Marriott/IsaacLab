@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -908,6 +909,555 @@ class ToolEndTargetExp(ManagerTermBase):
             exponent = exponent + torch.square(yaw_error) / std_yaw**2
         active = cmd.ref_time >= cmd.episode_length_s - window_s
         return torch.exp(-exponent) * active
+
+
+class ToolCaptureState(NamedTuple):
+    """The capture conditions of :class:`ToolCapture` at one instant. Boolean fields have shape (num_envs,)."""
+
+    in_envelope: torch.Tensor
+    """Whether the tool point is in the cone or the ball, however it got there."""
+    in_region: torch.Tensor
+    """Whether it is in the capture region as ``require_cone_entry`` defines it."""
+    captured: torch.Tensor
+    """Whether it is captured: in the capture region, slow and square."""
+    approached: torch.Tensor
+    """The cone-entry flag for this instant: set in the cone, kept in the envelope, cleared outside it."""
+    offset_t: torch.Tensor
+    """Tool point minus target, in the target's yaw frame [m]. Shape (num_envs, 3)."""
+    tool_pos: torch.Tensor
+    """Tool point in the environment-local world frame [m]. Shape (num_envs, 3)."""
+    tool_quat: torch.Tensor
+    """Tool frame orientation, quaternion (x, y, z, w). Shape (num_envs, 4)."""
+    target_pos: torch.Tensor
+    """Target in the environment-local world frame [m]. Shape (num_envs, 3)."""
+    target_quat: torch.Tensor
+    """Target yaw orientation, quaternion (x, y, z, w). Shape (num_envs, 4)."""
+
+
+class ToolCapture(ManagerTermBase):
+    """Reward a hanging tool for being captured at its end target: in the envelope, in the approach cone, slow.
+
+    The target is that of :class:`ToolEndTargetExp`: where the tool point would be if the vehicle sat
+    level at the trajectory end point with the payload hanging at rest. With ``d`` the tool point
+    relative to the target, in the target's yaw frame, the tool is captured when all of these hold:
+
+    * **Envelope and cone**: ``|d| <= tolerance_radius`` (the ball, where any direction counts), or ``d``
+      in the cone on the approach side: with ``a`` its distance along ``approach_axis`` and ``l`` its
+      distance from that axis, ``0 <= a <= capture_radius`` and ``l <= max(tip_radius, a * tan(cone_half_angle))``.
+      With ``tip_radius`` the cone has a blunt tip: near the target it is a cylinder of that radius, as
+      wide as the pocket the tool closes on, rather than narrowing to a point that position noise alone
+      would leave. It widens into the cone beyond ``a = tip_radius / tan(cone_half_angle)``.
+      With ``require_cone_entry``, the ball counts only once the tool has come in through the cone: a
+      per-environment flag is set while the tool is in the cone and cleared when it leaves the envelope
+      altogether, so a tool that reaches the ball from in front or from the side is not captured, while
+      one that came in through the cone can settle anywhere in the ball.
+    * **Low relative velocity**: the speed of the tool point relative to the target, which is at rest at
+      the end point, is at most ``max_rel_speed``.
+    * **Heading** (if ``max_yaw_error`` is set): the tool yaw is within ``max_yaw_error`` of the end yaw.
+
+    The reward is 1 while captured and 0 otherwise, during the last ``window_s`` seconds of the episode.
+    A momentary capture can be a swing passing through the target at the end of its arc, so the term also
+    logs, per episode, whether the tool stayed captured for ``dwell_s`` without a break
+    (``Metrics/tool_capture/success``) and the mean time at which that first happened in the episodes
+    that did (``Metrics/tool_capture/time_to_success``) [s].
+
+    The ``params`` of the term configuration are:
+
+    * ``asset_cfg``: SceneEntityCfg identifying the tool body. Must have ``body_names`` configured.
+    * ``tool_offset``: Tool point in the tool body frame [m].
+    * ``hang_offset``: Tool point relative to the tracked body when the payload hangs at rest below a
+      level vehicle, in the yaw-aligned vehicle frame [m].
+    * ``tool_rot``: Orientation of the tool frame in the tool body frame, as a quaternion (x, y, z, w),
+      chosen so that the tool frame lines up with the vehicle yaw frame at rest. Sets the tool yaw.
+    * ``capture_radius``: Length of the envelope along the cone [m].
+    * ``tolerance_radius``: Radius of the ball at the target that counts from any direction [m].
+    * ``approach_axis``: Direction from the target to the side the tool must arrive from, in the
+      target's yaw frame. Normalized internally.
+    * ``cone_half_angle``: Half-angle of the approach cone [rad].
+    * ``tip_radius``: Smallest radius of the cone, at its tip [m]. Defaults to 0.0, a sharp tip.
+    * ``max_rel_speed``: Largest speed of the tool point relative to the target [m/s].
+    * ``max_yaw_error``: Largest tool yaw error to the end yaw [rad], or None to ignore the yaw.
+    * ``require_cone_entry``: Whether the ball counts only after an approach through the cone. Defaults
+      to False, in which case the ball counts however the tool reached it.
+    * ``dwell_s``: Time the tool has to stay captured for the episode to count as a success [s].
+    * ``window_s``: Length of the window before the episode end in which the reward is active [s].
+    * ``command_name``: Name of the :class:`DroneTrajectoryCommand` to read the end pose from.
+    * ``debug_vis``: Whether to draw the capture envelope and the tool point, coloured by the capture
+      state, when the simulation is rendering. Defaults to True.
+    """
+
+    _HEADING_POINTER_LENGTH = 0.1
+    """Length of the tool heading pointer drawn by the debug visualization [m]."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        asset_cfg.resolve(env.scene)
+        self._asset: RigidObject = env.scene[asset_cfg.name]
+        self._body_id: int = asset_cfg.body_ids[0]  # type: ignore[index]
+        self._command_term = env.command_manager.get_term(cfg.params.get("command_name", "trajectory"))
+
+        def _expand(value, size):
+            return torch.tensor(value, device=env.device, dtype=torch.float32).expand(env.num_envs, size)
+
+        self._tool_b = _expand(cfg.params["tool_offset"], 3)
+        self._hang_v = _expand(cfg.params["hang_offset"], 3)
+        self._tool_rot_b = _expand(cfg.params["tool_rot"], 4)
+        self._axis_t = torch.nn.functional.normalize(_expand(cfg.params["approach_axis"], 3), dim=-1)
+
+        self._dwell_steps = max(1, round(cfg.params["dwell_s"] / env.step_dt))
+        self._streak = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        # Whether the tool came into the envelope through the cone (see ``require_cone_entry``).
+        self._approached = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._success = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._success_time = torch.zeros(env.num_envs, device=env.device)
+
+        self._debug_vis_handle = None
+        if cfg.params.get("debug_vis", True) and env.sim.is_rendering:
+            self._init_debug_vis(cfg)
+
+    def _init_debug_vis(self, cfg: RewardTermCfg):
+        """Create the capture markers, coloured by the capture state on every rendered frame.
+
+        * A translucent cone with its apex on the target, opening to the approach side, and, with
+          ``tip_radius``, a translucent cylinder of that radius along its axis: together the capture
+          cone, blunt tip included.
+        * A translucent ball at the target: the tolerance ball, captured from any direction.
+        * A small sphere on the tool point, with a pointer along the tool heading. The envelope cone's
+          axis is the target heading, so the tool is square to the target when the pointer runs along
+          the cone from its open end to its tip, the way the tool closes on the target.
+
+        All of them share one colour for the state: red outside the envelope, amber inside it but not
+        captured (too fast, not square, or in the ball without having come through the cone), green
+        captured, blue captured for the whole dwell.
+        """
+        # note: imported here because the marker class pulls in USD, and this module is imported by task
+        # configs that are parsed before the simulation app is launched.
+        import omni.kit.app
+
+        from isaaclab.markers import VisualizationMarkers
+
+        params = cfg.params
+        colors = ((0.9, 0.15, 0.1), (1.0, 0.65, 0.0), (0.1, 0.85, 0.2), (0.0, 0.55, 1.0))
+
+        def _markers(prim_path: str, make_shape, opacity: float) -> VisualizationMarkers:
+            # One prototype per state, so the state picks the colour through ``marker_indices``.
+            markers = {
+                f"state_{i}": make_shape(sim_utils.PreviewSurfaceCfg(diffuse_color=c, opacity=opacity))
+                for i, c in enumerate(colors)
+            }
+            return VisualizationMarkers(VisualizationMarkersCfg(prim_path=prim_path, markers=markers))
+
+        # A USD cone is centred on its origin with the apex towards +Z. Point the apex at the target, so it
+        # opens along the approach axis, and centre it half its height out along that axis.
+        height = params["capture_radius"]
+        radius = height * math.tan(params["cone_half_angle"])
+        self._cone_visualizer = _markers(
+            "/Visuals/Reward/capture_cone",
+            lambda mat: sim_utils.ConeCfg(radius=radius, height=height, axis="Z", visual_material=mat),
+            opacity=0.25,
+        )
+        # The blunt tip: the cylinder the cone is at least as wide as, over the same length.
+        tip_radius = params.get("tip_radius", 0.0)
+        self._tip_visualizer = None
+        if tip_radius > 0.0:
+            self._tip_visualizer = _markers(
+                "/Visuals/Reward/capture_cone_tip",
+                lambda mat: sim_utils.CylinderCfg(radius=tip_radius, height=height, axis="Z", visual_material=mat),
+                opacity=0.25,
+            )
+        self._ball_visualizer = _markers(
+            "/Visuals/Reward/capture_tolerance",
+            lambda mat: sim_utils.SphereCfg(radius=params["tolerance_radius"], visual_material=mat),
+            opacity=0.35,
+        )
+        self._tool_visualizer = _markers(
+            "/Visuals/Reward/capture_tool_point",
+            lambda mat: sim_utils.SphereCfg(radius=0.02, visual_material=mat),
+            opacity=1.0,
+        )
+        # A slim cone just ahead of the tool point, its tip along the tool heading.
+        self._heading_visualizer = _markers(
+            "/Visuals/Reward/capture_tool_heading",
+            lambda mat: sim_utils.ConeCfg(
+                radius=0.015, height=self._HEADING_POINTER_LENGTH, axis="X", visual_material=mat
+            ),
+            opacity=1.0,
+        )
+        apex_dir = -self._axis_t[:1]
+        z_axis = torch.tensor([[0.0, 0.0, 1.0]], device=apex_dir.device)
+        rot_axis = torch.cross(z_axis, apex_dir, dim=-1)
+        angle = torch.acos(torch.sum(z_axis * apex_dir, dim=-1).clamp(-1.0, 1.0))
+        if torch.norm(rot_axis) < 1e-6:
+            # The apex direction is along +Z or -Z: any horizontal axis turns it.
+            rot_axis = torch.tensor([[1.0, 0.0, 0.0]], device=apex_dir.device)
+        rot = math_utils.quat_from_angle_axis(angle, torch.nn.functional.normalize(rot_axis, dim=-1))
+        num_envs = self._axis_t.shape[0]
+        self._cone_rot_t = rot.expand(num_envs, 4)
+        self._cone_center_t = self._axis_t * (height / 2.0)
+
+        # Drawn from the post-update event, like the command debug markers, rather than from
+        # :meth:`__call__`: rewards are computed after the step has been rendered, so markers set there
+        # would trail the drawn robot by a full policy step.
+        self._debug_vis_handle = (
+            omni.kit.app.get_app_interface()
+            .get_post_update_event_stream()
+            .create_subscription_to_pop(lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event))
+        )
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        # Called by the reward manager after the environment has cleared its log for this reset, so the
+        # episode outcome can be added to it.
+        success = self._success[env_ids]
+        if success.numel() > 0:
+            log = self._env.extras.setdefault("log", {})
+            log["Metrics/tool_capture/success"] = success.float().mean().item()
+            if success.any():
+                log["Metrics/tool_capture/time_to_success"] = self._success_time[env_ids][success].mean().item()
+        self._streak[env_ids] = 0
+        self._approached[env_ids] = False
+        self._success[env_ids] = False
+        self._success_time[env_ids] = 0.0
+
+    def __del__(self):
+        if self._debug_vis_handle is not None:
+            self._debug_vis_handle.unsubscribe()
+            self._debug_vis_handle = None
+
+    def captured(self) -> torch.Tensor:
+        """Whether the tool is captured now, regardless of the reward window.
+
+        Returns:
+            A boolean tensor of shape (num_envs,).
+        """
+        return self.capture_state().captured
+
+    def capture_state(self) -> ToolCaptureState:
+        """Evaluate the capture conditions.
+
+        This has no side effects, so the debug visualization and other terms can call it between steps:
+        the cone-entry flag it returns for this instant is stored by :meth:`__call__`, once per step.
+
+        Returns:
+            The capture state.
+        """
+        params = self.cfg.params
+        tool_pos, tool_quat, target_pos, target_quat = hanging_tool_and_end_target(
+            self._asset,
+            self._body_id,
+            self._tool_b,
+            self._tool_rot_b,
+            self._hang_v,
+            self._command_term,
+            self._env.scene.env_origins,
+        )
+        # -- envelope and cone, in the target's yaw frame
+        offset_t = math_utils.quat_apply_inverse(target_quat, tool_pos - target_pos)
+        distance = torch.norm(offset_t, dim=-1)
+        along = torch.sum(offset_t * self._axis_t, dim=-1)
+        lateral = torch.norm(offset_t - along.unsqueeze(-1) * self._axis_t, dim=-1)
+        cone_radius = torch.clamp(along * math.tan(params["cone_half_angle"]), min=params.get("tip_radius", 0.0))
+        in_cone = (along >= 0.0) & (along <= params["capture_radius"]) & (lateral <= cone_radius)
+        in_ball = distance <= params["tolerance_radius"]
+        in_envelope = in_cone | in_ball
+        # Set while in the cone, kept while still in the envelope, cleared on leaving it.
+        approached = (self._approached | in_cone) & in_envelope
+        if params.get("require_cone_entry", False):
+            in_capture_region = in_cone | (in_ball & approached)
+        else:
+            in_capture_region = in_envelope
+
+        # -- relative velocity: the target is at rest at the end point, so it is the tool point's own
+        body_quat = self._asset.data.body_link_quat_w.torch[:, self._body_id]
+        lever_w = math_utils.quat_apply(body_quat, self._tool_b)
+        ang_vel_w = self._asset.data.body_link_ang_vel_w.torch[:, self._body_id]
+        tool_vel_w = self._asset.data.body_link_lin_vel_w.torch[:, self._body_id] + torch.cross(
+            ang_vel_w, lever_w, dim=-1
+        )
+        slow = torch.norm(tool_vel_w, dim=-1) <= params["max_rel_speed"]
+
+        captured = in_capture_region & slow
+        if params.get("max_yaw_error") is not None:
+            _, _, tool_yaw = math_utils.euler_xyz_from_quat(tool_quat)
+            yaw_error = math_utils.wrap_to_pi(tool_yaw - self._command_term.yaw_end)
+            captured &= torch.abs(yaw_error) <= params["max_yaw_error"]
+        return ToolCaptureState(
+            in_envelope=in_envelope,
+            in_region=in_capture_region,
+            captured=captured,
+            approached=approached,
+            offset_t=offset_t,
+            tool_pos=tool_pos,
+            tool_quat=tool_quat,
+            target_pos=target_pos,
+            target_quat=target_quat,
+        )
+
+    def _debug_vis_callback(self, event):
+        # note: needed in case the robot is de-initialized, since its data cannot be accessed then
+        if not self._asset.is_initialized:
+            return
+        cs = self.capture_state()
+        in_envelope, captured, tool_pos, tool_quat = cs.in_envelope, cs.captured, cs.tool_pos, cs.tool_quat
+        target_pos, target_quat = cs.target_pos, cs.target_quat
+        # 0 outside the envelope, 1 inside it but not captured (too fast, not square, or in the ball without
+        # having come through the cone), 2 captured, 3 captured for the whole dwell (a success).
+        state = in_envelope.long() + captured.long() + (captured & (self._streak >= self._dwell_steps)).long()
+        origins = self._env.scene.env_origins
+        cone_quat = math_utils.quat_mul(target_quat, self._cone_rot_t)
+        cone_pos = target_pos + math_utils.quat_apply(target_quat, self._cone_center_t)
+        self._cone_visualizer.visualize(cone_pos + origins, cone_quat, marker_indices=state)
+        if self._tip_visualizer is not None:
+            # Symmetric about its axis, so the cone's orientation and centre serve.
+            self._tip_visualizer.visualize(cone_pos + origins, cone_quat, marker_indices=state)
+        self._ball_visualizer.visualize(target_pos + origins, marker_indices=state)
+        self._tool_visualizer.visualize(tool_pos + origins, marker_indices=state)
+        # The heading pointer shows the tool yaw only, which is what the capture compares. It starts at the
+        # tool point, so it is centred half its length ahead.
+        heading_quat = math_utils.yaw_quat(tool_quat)
+        pointer_offset = torch.zeros_like(tool_pos)
+        pointer_offset[:, 0] = self._HEADING_POINTER_LENGTH / 2.0 + 0.02
+        pointer_pos = tool_pos + math_utils.quat_apply(heading_quat, pointer_offset)
+        self._heading_visualizer.visualize(pointer_pos + origins, heading_quat, marker_indices=state)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        asset_cfg: SceneEntityCfg,
+        tool_offset: tuple[float, float, float],
+        hang_offset: tuple[float, float, float],
+        tool_rot: tuple[float, float, float, float],
+        capture_radius: float,
+        tolerance_radius: float,
+        approach_axis: tuple[float, float, float],
+        cone_half_angle: float,
+        max_rel_speed: float,
+        max_yaw_error: float | None,
+        dwell_s: float,
+        window_s: float,
+        require_cone_entry: bool = False,
+        tip_radius: float = 0.0,
+        command_name: str = "trajectory",
+        debug_vis: bool = True,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,) with values in {0, 1}.
+        """
+        cmd = self._command_term
+        active = cmd.ref_time >= cmd.episode_length_s - window_s
+        cs = self.capture_state()
+        self._approached = cs.approached
+        captured = cs.captured & active
+
+        self._streak = torch.where(captured, self._streak + 1, torch.zeros_like(self._streak))
+        newly = (self._streak >= self._dwell_steps) & ~self._success
+        self._success_time = torch.where(newly, cmd.ref_time, self._success_time)
+        self._success |= newly
+        return captured.float()
+
+
+class ToolCaptureProgress(ManagerTermBase):
+    """Reward the tool for making progress towards capture by a :class:`ToolCapture` term.
+
+    The reward is the change in a potential per step, ``phi(s_t) - phi(s_{t-1})``, so it pays for moving
+    towards capture from wherever the tool is, including after a miss, and sums over an episode to the
+    potential at its end minus that at its start. The first step after a reset scores zero.
+
+    With ``route_aware``, the potential is the negative length of the route through the approach cone:
+
+    * in the capture region (the cone, and the ball as the capture term's ``require_cone_entry``
+      defines it): ``-|d|``, the distance to the target;
+    * elsewhere: ``-(|d - s| + staging_distance)``, the distance to a staging point ``s`` on the cone
+      axis ``staging_distance`` behind the target, plus the way from there down the cone.
+
+    So outside the cone, progress means heading for the staging point, not the target: after arriving
+    from the wrong side, backing out and coming round scores as progress rather than as a retreat. The
+    two pieces agree at the staging point, so a clean approach through it is smooth; entering the region
+    elsewhere scores a one-off gain, and leaving it the matching loss. Without ``route_aware``, the
+    potential is ``-|d|`` everywhere.
+
+    The route is a straight line to the staging point, which from in front passes through the target: fine
+    for a point target, not for a physical one, which would need a route around it.
+
+    The ``params`` of the term configuration are:
+
+    * ``capture_term_name``: Name of the :class:`ToolCapture` reward term whose target, cone and capture
+      region this follows.
+    * ``route_aware``: Whether the potential follows the route through the cone. Defaults to True.
+    * ``staging_distance``: Distance of the staging point behind the target along the cone axis [m], or
+      None for the capture term's ``capture_radius``, the open end of the cone. Defaults to None.
+    * ``debug_vis``: Whether to draw the staging point and the route, coloured by the last step's
+      progress, when the simulation is rendering (see :meth:`_init_debug_vis`). Defaults to True.
+    """
+
+    _PROGRESS_DEADBAND = 0.005
+    """Per-step progress below which the debug route is drawn as no progress [m]."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._capture: ToolCapture | None = None
+        self._prev_phi = torch.zeros(env.num_envs, device=env.device)
+        self._has_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._last_progress = torch.zeros(env.num_envs, device=env.device)
+
+        self._debug_vis_handle = None
+        if cfg.params.get("debug_vis", True) and env.sim.is_rendering:
+            self._init_debug_vis()
+
+    def __del__(self):
+        if self._debug_vis_handle is not None:
+            self._debug_vis_handle.unsubscribe()
+            self._debug_vis_handle = None
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._has_prev[env_ids] = False
+        self._last_progress[env_ids] = 0.0
+
+    def _capture_term(self) -> ToolCapture:
+        # Looked up on first use rather than in __init__: the reward manager builds the terms in order, so
+        # the capture term may not exist yet when this one is built.
+        if self._capture is None:
+            func = self._env.reward_manager.get_term_cfg(self.cfg.params["capture_term_name"]).func
+            if isinstance(func, type):
+                # Not built yet: the manager is still constructing its terms.
+                return func  # type: ignore[return-value]
+            self._capture = func  # type: ignore[assignment]
+        return self._capture
+
+    def _staging_distance(self) -> float:
+        staging_distance = self.cfg.params.get("staging_distance")
+        if staging_distance is None:
+            staging_distance = self._capture_term().cfg.params["capture_radius"]
+        return staging_distance
+
+    def _potential(self, cs: ToolCaptureState) -> torch.Tensor:
+        distance = torch.norm(cs.offset_t, dim=-1)
+        if not self.cfg.params.get("route_aware", True):
+            return -distance
+        staging_distance = self._staging_distance()
+        staging_t = self._capture_term()._axis_t * staging_distance
+        route = torch.norm(cs.offset_t - staging_t, dim=-1) + staging_distance
+        return -torch.where(cs.in_region, distance, route)
+
+    def _init_debug_vis(self):
+        """Create the route markers, drawn on every rendered frame.
+
+        * The staging point: a small sphere on the cone axis, grey until the tool has come in through the
+          cone (the capture term's cone-entry flag), cyan once it has.
+        * The route the potential measures: a thin rod from the tool to the staging point and another down
+          the cone to the target; inside the capture region, a single rod from the tool to the target.
+          Without ``route_aware``, always that single rod.
+
+        The rods are coloured by the last step's progress: green for progress along the route, red for
+        lost ground, grey for under :attr:`_PROGRESS_DEADBAND`.
+        """
+        # note: imported here because the marker class pulls in USD, and this module is imported by task
+        # configs that are parsed before the simulation app is launched.
+        import omni.kit.app
+
+        from isaaclab.markers import VisualizationMarkers
+
+        def _material(color):
+            return sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+
+        rod = {
+            f"progress_{name}": sim_utils.CylinderCfg(radius=0.006, height=1.0, axis="Z", visual_material=_material(c))
+            for name, c in (("gain", (0.1, 0.85, 0.2)), ("loss", (0.9, 0.15, 0.1)), ("none", (0.6, 0.6, 0.6)))
+        }
+        self._route_visualizer = VisualizationMarkers(
+            VisualizationMarkersCfg(prim_path="/Visuals/Reward/capture_route", markers=rod)
+        )
+        staging = {
+            f"staging_{name}": sim_utils.SphereCfg(radius=0.02, visual_material=_material(c))
+            for name, c in (("not_approached", (0.6, 0.6, 0.6)), ("approached", (0.0, 0.8, 0.9)))
+        }
+        self._staging_visualizer = VisualizationMarkers(
+            VisualizationMarkersCfg(prim_path="/Visuals/Reward/capture_staging", markers=staging)
+        )
+        # Drawn from the post-update event, like the capture markers, so they keep up with the drawn robot.
+        self._debug_vis_handle = (
+            omni.kit.app.get_app_interface()
+            .get_post_update_event_stream()
+            .create_subscription_to_pop(lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event))
+        )
+
+    def _debug_vis_callback(self, event):
+        capture = self._capture_term()
+        # note: needed in case the robot is de-initialized, since its data cannot be accessed then
+        if isinstance(capture, type) or not capture._asset.is_initialized:
+            return
+        cs = capture.capture_state()
+        origins = self._env.scene.env_origins
+        staging_w = cs.target_pos + math_utils.quat_apply(cs.target_quat, capture._axis_t * self._staging_distance())
+        direct = cs.in_region | (not self.cfg.params.get("route_aware", True))
+        # Two rods per environment: tool -> staging point -> target outside the capture region; inside it,
+        # tool -> target and a hidden second rod. A constant count keeps the point instancer from resizing.
+        first_end = torch.where(direct.unsqueeze(-1), cs.target_pos, staging_w)
+        starts = torch.stack([cs.tool_pos, staging_w], dim=1)
+        ends = torch.stack([first_end, cs.target_pos], dim=1)
+        visible = torch.stack([torch.ones_like(direct), ~direct], dim=1)
+        progress = self._last_progress
+        state = torch.where(
+            progress > self._PROGRESS_DEADBAND, 0, torch.where(progress < -self._PROGRESS_DEADBAND, 1, 2)
+        )
+        self._draw_rods(
+            starts.reshape(-1, 3),
+            ends.reshape(-1, 3),
+            visible.reshape(-1),
+            state.repeat_interleave(2),
+            origins.repeat_interleave(2, dim=0),
+        )
+        self._staging_visualizer.visualize(staging_w + origins, marker_indices=cs.approached.long())
+
+    def _draw_rods(self, starts, ends, visible, marker_indices, origins):
+        """Draw unit-height Z cylinders stretched from ``starts`` to ``ends``; hidden ones get zero scale."""
+        segment = ends - starts
+        length = torch.norm(segment, dim=-1)
+        direction = segment / length.clamp(min=1e-6).unsqueeze(-1)
+        z_axis = torch.zeros_like(direction)
+        z_axis[:, 2] = 1.0
+        rot_axis = torch.cross(z_axis, direction, dim=-1)
+        rot_norm = torch.norm(rot_axis, dim=-1)
+        angle = torch.atan2(rot_norm, torch.sum(z_axis * direction, dim=-1))
+        # Parallel or antiparallel to Z: any horizontal axis turns it.
+        rot_axis = torch.where(
+            (rot_norm < 1e-6).unsqueeze(-1), torch.tensor([1.0, 0.0, 0.0], device=starts.device), rot_axis
+        )
+        quat = math_utils.quat_from_angle_axis(angle, torch.nn.functional.normalize(rot_axis, dim=-1))
+        thickness = visible.float()
+        scales = torch.stack([thickness, thickness, length * thickness], dim=-1)
+        self._route_visualizer.visualize(
+            translations=(starts + ends) / 2.0 + origins,
+            orientations=quat,
+            scales=scales,
+            marker_indices=marker_indices,
+        )
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        capture_term_name: str,
+        route_aware: bool = True,
+        staging_distance: float | None = None,
+        debug_vis: bool = True,
+    ) -> torch.Tensor:
+        """Compute the reward.
+
+        Returns:
+            A 1-D tensor of shape (num_envs,): the change in the potential this step [m].
+        """
+        phi = self._potential(self._capture_term().capture_state())
+        reward = torch.where(self._has_prev, phi - self._prev_phi, torch.zeros_like(phi))
+        self._prev_phi = phi
+        self._has_prev[:] = True
+        self._last_progress = reward
+        return reward
 
 
 class DroneEndPoseExp(ManagerTermBase):

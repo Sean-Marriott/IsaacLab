@@ -250,6 +250,11 @@ class DroneTrajectoryCommandCfg(CommandTermCfg):
     )
     """Markers drawn at the look-ahead reference positions."""
 
+    reference_debug_vis: bool = True
+    """Whether the debug visualization draws the reference: the goal pose, the path and the look-ahead
+    points. Defaults to True. The early-termination flash is drawn either way. Turn it off where a task
+    draws its own target markers, such as a still reference whose markers would all sit on the target."""
+
     termination_flash_steps: int = 5
     """Number of policy steps an early-termination flash stays on screen. Zero disables it.
 

@@ -12,6 +12,7 @@ the observation introduced by the function.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -532,6 +533,53 @@ def trajectory_yaw_error(
 
 
 @generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_yaw_error_sin_cos(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Sine and cosine of the yaw error of the tracked frame to the reference.
+
+    The same error as :func:`trajectory_yaw_error`, encoded without its jump at +/-pi: two headings
+    either side of pointing directly away from the reference give nearly the same observation instead of
+    opposite ones.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+
+    Returns:
+        The sine and cosine of the yaw error. Shape is (num_envs, 2).
+    """
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    _, quat_w, _ = command_term.tracked_frame_state()
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    error = command_term.command[:, 9] - yaw
+    return torch.stack([torch.sin(error), torch.cos(error)], dim=-1)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def trajectory_position_offset_r(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Position of the tracked frame relative to the reference, in the reference's yaw frame.
+
+    :func:`trajectory_position_error_v` gives the same displacement in the vehicle frame, which is the
+    frame of the action. This one is in the frame of the target pose itself, so where the tracked frame
+    sits relative to the target (ahead of it, behind it, to one side) can be read directly, without
+    rotating by the yaw error.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+
+    Returns:
+        The tracked frame's position minus the reference position [m], expressed in the frame rotated by
+        the reference yaw. Shape is (num_envs, 3).
+    """
+    command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
+    pos_w, _, _ = command_term.tracked_frame_state()
+    command = command_term.command
+    zeros = torch.zeros_like(command[:, 9])
+    ref_quat = math_utils.quat_from_euler_xyz(zeros, zeros, command[:, 9])
+    return math_utils.quat_apply_inverse(ref_quat, pos_w - command[:, :3])
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
 def trajectory_ref_yaw_rate(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
     """Reference yaw rate feed-forward.
 
@@ -572,6 +620,56 @@ def trajectory_lookahead_v(
     return math_utils.quat_apply_inverse(vehicle_quat, lookahead_w).flatten(start_dim=1)
 
 
+@generic_io_descriptor(dtype=torch.float32, observation_type="RootState", on_inspect=[record_shape])
+def body_lin_vel_v(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Linear velocity of a body, in the vehicle frame.
+
+    When the command tracks a payload frame, the velocity errors are the payload's. This gives the policy
+    the velocity of the airframe itself, which is what its velocity command acts on.
+
+    Args:
+        env: The environment instance.
+        asset_cfg: SceneEntityCfg identifying the asset, with ``body_names`` selecting the body.
+
+    Returns:
+        The body's linear velocity [m/s] in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    lin_vel_w = asset.data.body_link_lin_vel_w.torch[:, asset_cfg.body_ids[0]]  # type: ignore[index]
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), lin_vel_w)
+
+
+@generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
+def body_rest_target_error_v(
+    env: ManagerBasedRLEnv, command_name: str, hang_offset: tuple[float, float, float], asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Error of a body to where it rests when the hanging tool it carries is on the reference, in the vehicle frame.
+
+    When the command tracks a hanging tool, the body's rest target is the reference position minus
+    ``hang_offset`` rotated by the reference yaw: where the body would sit, level, with the payload
+    hanging still and the tool on the reference. The difference from the tool's own error is how far the
+    swing and the hang carry the tool from the body.
+
+    Args:
+        env: The manager-based RL environment instance.
+        command_name: Name of the trajectory command term to read the reference from.
+        hang_offset: Tool point relative to the body when the payload hangs at rest below a level
+            vehicle, in the yaw-aligned vehicle frame [m].
+        asset_cfg: SceneEntityCfg identifying the asset, with ``body_names`` selecting the body.
+
+    Returns:
+        The rest target minus the body position [m], in the yaw-only vehicle frame. Shape is (num_envs, 3).
+    """
+    asset: Multirotor = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    zeros = torch.zeros_like(command[:, 9])
+    ref_yaw_quat = math_utils.quat_from_euler_xyz(zeros, zeros, command[:, 9])
+    hang_offset_v = torch.tensor(hang_offset, device=env.device).expand(env.num_envs, 3)
+    rest_target_w = command[:, :3] - math_utils.quat_apply(ref_yaw_quat, hang_offset_v)
+    body_pos_w = asset.data.body_pos_w.torch[:, asset_cfg.body_ids[0]] - env.scene.env_origins  # type: ignore[index]
+    return math_utils.quat_apply_inverse(_vehicle_frame_quat(asset), rest_target_w - body_pos_w)
+
+
 @generic_io_descriptor(dtype=torch.float32, observation_type="Command", on_inspect=[record_shape])
 def trajectory_time_to_go(env: ManagerBasedRLEnv, command_name: str, horizon_s: float) -> torch.Tensor:
     """Time left until the reference reaches its end point, clipped to a horizon and normalized.
@@ -592,6 +690,103 @@ def trajectory_time_to_go(env: ManagerBasedRLEnv, command_name: str, horizon_s: 
     """
     command_term: DroneTrajectoryCommand = env.command_manager.get_term(command_name)
     return torch.clamp(command_term.time_to_end_point() / horizon_s, max=1.0).unsqueeze(-1)
+
+
+class CalibratedRestTargetError(ManagerTermBase):
+    """Error of a body to where it rests when the hanging tool it carries is on the reference, using the
+    payload's calibrated rest pose rather than its nominal one, in the vehicle frame.
+
+    :func:`body_rest_target_error_v` places the tool with a fixed ``hang_offset``. A real payload rests at a
+    hinge offset of its own (see :class:`~isaaclab_tasks.contrib.drone_arl.mdp.events.RandomizePayloadHangOffset`),
+    so zeroing that error leaves the tool off the reference by the difference, up to ~0.15 m on the Mk3
+    chainsaw. This term uses the rest offset of the payload instead: the nominal offset swung about the pivot
+    by the payload's rest hinge angles, outer hinge first. Zeroing it puts the tool on the reference once any
+    swing has died out, and since the rest pose does not move with the swing, the error stays as smooth as
+    the nominal one.
+
+    On the vehicle the rest angles come from a calibration: the hinge encoders averaged while hovering still
+    before the approach. In simulation they are the randomized rest offset plus a calibration error drawn
+    per episode, so the policy still needs the tool's own error for the last centimetres.
+
+    The hinges are taken as rotations about the vehicle's y axis (outer, ``+`` swings the payload aft) and x
+    axis (inner, ``+`` swings it left), as in ``RandomizePayloadHangOffset``, both through the pivot.
+
+    The ``params`` of the term configuration are:
+
+    * ``command_name``: Name of the trajectory command term to read the reference from.
+    * ``hang_offset``: Nominal tool point relative to the body with the payload hanging at its default hinge
+      angles below a level vehicle, in the yaw-aligned vehicle frame [m].
+    * ``asset_cfg``: SceneEntityCfg identifying the asset, with ``body_names`` selecting the body.
+    * ``pivot_cfg``: SceneEntityCfg with the body whose link frame origin is the pivot.
+    * ``rest_term_name``: Name of the ``RandomizePayloadHangOffset`` event term holding the rest angles.
+    * ``calibration_std``: Standard deviation of the calibration error on each rest angle [rad]. Defaults
+      to 0.0175 (1 deg).
+
+    Returns a tensor of shape (num_envs, 3): the rest target minus the body position [m], in the yaw-only
+    vehicle frame.
+    """
+
+    def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        pivot_cfg: SceneEntityCfg = cfg.params["pivot_cfg"]
+        asset_cfg.resolve(env.scene)
+        pivot_cfg.resolve(env.scene)
+        self._asset: Articulation = env.scene[asset_cfg.name]
+        self._body_id: int = asset_cfg.body_ids[0]  # type: ignore[index]
+        self._pivot_id: int = pivot_cfg.body_ids[0]  # type: ignore[index]
+        self._hang_v = torch.tensor(cfg.params["hang_offset"], device=env.device).expand(env.num_envs, 3)
+        self._rest_term_name: str = cfg.params["rest_term_name"]
+        self._calibration_std: float = cfg.params.get("calibration_std", 0.0175)
+        self._calibration_error = torch.zeros(env.num_envs, 2, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        error = self._calibration_error[env_ids]
+        self._calibration_error[env_ids] = torch.randn_like(error) * self._calibration_std
+
+    def rest_hang_offset(self) -> torch.Tensor:
+        """Tool point relative to the body with the payload at its calibrated rest pose below a level vehicle.
+
+        Returns:
+            The offset in the yaw-aligned vehicle frame [m]. Shape is (num_envs, 3).
+        """
+        rest = self._env.event_manager.get_term_cfg(self._rest_term_name).func.rest_offset + self._calibration_error
+        data = self._asset.data
+        body_quat = data.body_link_quat_w.torch[:, self._body_id]
+        # The pivot is fixed to the body: its offset in the body frame, which is the vehicle frame when level.
+        pivot_b = math_utils.quat_apply_inverse(
+            body_quat, data.body_link_pos_w.torch[:, self._pivot_id] - data.body_link_pos_w.torch[:, self._body_id]
+        )
+        zeros = torch.zeros_like(rest[:, 0])
+        hinge_quat = math_utils.quat_mul(
+            math_utils.quat_from_euler_xyz(zeros, rest[:, 0], zeros),
+            math_utils.quat_from_euler_xyz(rest[:, 1], zeros, zeros),
+        )
+        return pivot_b + math_utils.quat_apply(hinge_quat, self._hang_v - pivot_b)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        hang_offset: tuple[float, float, float],
+        asset_cfg: SceneEntityCfg,
+        pivot_cfg: SceneEntityCfg,
+        rest_term_name: str,
+        calibration_std: float = 0.0175,
+    ) -> torch.Tensor:
+        """Compute the observation.
+
+        Returns:
+            The rest target minus the body position [m], in the yaw-only vehicle frame. Shape is (num_envs, 3).
+        """
+        command = env.command_manager.get_command(command_name)
+        zeros = torch.zeros_like(command[:, 9])
+        ref_yaw_quat = math_utils.quat_from_euler_xyz(zeros, zeros, command[:, 9])
+        rest_target_w = command[:, :3] - math_utils.quat_apply(ref_yaw_quat, self.rest_hang_offset())
+        body_pos_w = self._asset.data.body_pos_w.torch[:, self._body_id] - env.scene.env_origins
+        return math_utils.quat_apply_inverse(_vehicle_frame_quat(self._asset), rest_target_w - body_pos_w)
 
 
 class ToolEndTargetError(ManagerTermBase):

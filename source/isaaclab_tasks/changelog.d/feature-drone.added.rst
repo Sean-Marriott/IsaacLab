@@ -102,3 +102,37 @@
   :meth:`~isaaclab_tasks.contrib.drone_arl.mdp.commands.DroneTrajectoryCommand.time_to_end_point`, and
   the ``exclude_end_s`` parameter of :func:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.position_tracking_exp`,
   which turns the reward off for the end of the reference.
+* Added ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign``, in which the M350 spawns away from a
+  target pose for the Mk3 chainsaw's cutting mouth and flies the mouth onto it and holds it there while
+  damping the swing, with no trajectory to follow, with PPO and recurrent PPO runners.
+  Its policy observes the airframe's velocity and its error to where it rests with the mouth on
+  target, from the new :func:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.body_lin_vel_v` and
+  :func:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.body_rest_target_error_v` terms.
+* Added the :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCapture` reward, which scores a hanging
+  tool for being captured at its end target, inside an approach cone, slow and square to it, and logs a
+  dwell-based success rate, and used it in ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign``.
+* Added capture markers to :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCapture`: the capture
+  envelope as a translucent cone, the tolerance ball, and the tool point with a heading pointer, all
+  coloured by the capture state. Added
+  :attr:`~isaaclab_tasks.contrib.drone_arl.mdp.commands.DroneTrajectoryCommandCfg.reference_debug_vis`
+  to hide the reference markers of a trajectory command while keeping its termination flash.
+* Added the :func:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.trajectory_yaw_error_sin_cos` and
+  :func:`~isaaclab_tasks.contrib.drone_arl.mdp.observations.trajectory_position_offset_r` observations, and
+  used them in ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign`` for the yaw error and the mouth's
+  position in the target frame.
+* Added the ``require_cone_entry`` parameter of :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCapture`,
+  which counts the tolerance ball only after the tool has come in through the approach cone.
+* Added the :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCaptureProgress` reward, which pays per-step
+  progress along the route to capture through the approach cone, and the
+  :func:`~isaaclab_tasks.contrib.drone_arl.mdp.events.reset_root_state_on_approach` event, which spawns the tracked
+  frame on the approach line to a still target with configurable spreads. ``ToolCapture`` now returns its state as a
+  :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCaptureState`. In
+  ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign`` the mouth now spawns on the approach line, the cone
+  entry is required and the progress reward is used.
+* Added route markers to :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCaptureProgress`: the staging
+  point, coloured by the cone-entry flag, and the route the progress is measured along, coloured by the last step's
+  progress.
+* Added the ``tip_radius`` parameter of :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ToolCapture`, a blunt
+  tip that keeps the approach cone at least that wide near the target, drawn as a cylinder along the cone. The cone
+  is now bounded along its axis at ``capture_radius`` rather than by distance, and ``IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign``
+  uses a tip as wide as its tolerance ball.

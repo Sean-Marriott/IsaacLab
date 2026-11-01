@@ -373,6 +373,98 @@ def reset_root_state_on_trajectory(
     asset.write_root_velocity_to_sim_index(root_velocity=velocities, env_ids=env_ids)
 
 
+def reset_root_state_on_approach(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    command_name: str = "trajectory",
+    approach_axis: tuple[float, float, float] = (-1.0, 0.0, 0.0),
+    distance_range: tuple[float, float] = (0.6, 2.0),
+    lateral_range: tuple[float, float] = (0.0, 0.0),
+    vertical_range: tuple[float, float] = (0.0, 0.0),
+    yaw_noise: tuple[float, float] = (0.0, 0.0),
+    rp_noise: tuple[float, float] = (0.0, 0.0),
+    vel_noise: tuple[float, float] = (0.0, 0.0),
+    angvel_noise: tuple[float, float] = (0.0, 0.0),
+    rest_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Reset the drone so that the tracked frame starts on the approach line to a still target.
+
+    The target is the reference of the trajectory command at ``t = 0``. The tracked frame (such as a tool
+    on a hanging payload) is placed ``distance`` along ``approach_axis`` from it, in the target's yaw
+    frame, then moved ``lateral`` and ``vertical`` off that line; the vehicle faces the target heading,
+    turned by ``yaw_noise``. With the spreads at zero, every episode starts squarely on the approach line,
+    facing the target; widening them (for example from a curriculum through
+    :func:`~isaaclab.envs.mdp.modify_term_cfg`) makes the start progressively harder.
+
+    The command is sampled here, as in :func:`reset_root_state_on_trajectory`, so the drone is placed on
+    the target of this episode rather than the previous one.
+
+    Args:
+        env: The manager-based RL environment instance.
+        env_ids: Indices of the environments to reset.
+        command_name: Name of the trajectory command term that holds the target.
+        approach_axis: Direction from the target to the side the tracked frame arrives from, in the
+            target's yaw frame. Normalized internally.
+        distance_range: Range of the distance along the approach axis [m].
+        lateral_range: Range of the offset across the approach axis, horizontally [m].
+        vertical_range: Range of the offset across the approach axis, vertically [m].
+        yaw_noise: Range of the vehicle yaw relative to the target yaw [rad].
+        rp_noise: Range of the initial roll and pitch [rad].
+        vel_noise: Range of the initial linear velocity on each axis [m/s].
+        angvel_noise: Range of the initial angular velocity about each axis [rad/s].
+        rest_offset: Position of the tracked frame relative to the root when the vehicle is level and
+            any payload hangs at rest, in the yaw-aligned vehicle frame [m].
+        asset_cfg: SceneEntityCfg identifying the asset to reset.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_term = env.command_manager.get_term(command_name)
+    env_ids = resolve_env_ids(env_ids, env.num_envs, asset.device)
+    num_resets = len(env_ids)
+
+    command_term.sample_parameters(env_ids)
+    command_term.evaluate_at(env_ids, torch.zeros(num_resets, device=asset.device))
+    command_term._sampled_by_event[env_ids] = True
+
+    def _sample(noise_range: tuple[float, float], size: tuple[int, ...]) -> torch.Tensor:
+        return math_utils.sample_uniform(noise_range[0], noise_range[1], size, device=asset.device)
+
+    # -- tracked frame on the approach line, in the target's yaw frame
+    axis = torch.nn.functional.normalize(torch.tensor(approach_axis, device=asset.device), dim=0)
+    up = torch.tensor([0.0, 0.0, 1.0], device=asset.device)
+    across = torch.linalg.cross(up, axis)
+    if torch.norm(across) < 1e-6:
+        # A vertical approach: any horizontal direction is across it.
+        across = torch.tensor([1.0, 0.0, 0.0], device=asset.device)
+    across = torch.nn.functional.normalize(across, dim=0)
+    vertical = torch.linalg.cross(axis, across)
+    offset_t = (
+        _sample(distance_range, (num_resets, 1)) * axis
+        + _sample(lateral_range, (num_resets, 1)) * across
+        + _sample(vertical_range, (num_resets, 1)) * vertical
+    )
+    zeros = torch.zeros(num_resets, device=asset.device)
+    target_yaw = command_term.yaw_ref[env_ids]
+    frame_pos = command_term.pos_ref_w[env_ids] + math_utils.quat_apply(
+        math_utils.quat_from_euler_xyz(zeros, zeros, target_yaw), offset_t
+    )
+
+    # -- vehicle placed so the tracked frame is there with the payload at rest
+    yaw = target_yaw + _sample(yaw_noise, (num_resets,))
+    rest_offset_w = math_utils.quat_apply(
+        math_utils.quat_from_euler_xyz(zeros, zeros, yaw),
+        torch.tensor(rest_offset, device=asset.device).expand(num_resets, 3),
+    )
+    positions = frame_pos - rest_offset_w + env.scene.env_origins[env_ids]
+    orientations = math_utils.quat_from_euler_xyz(
+        _sample(rp_noise, (num_resets,)), _sample(rp_noise, (num_resets,)), yaw
+    )
+    velocities = torch.cat([_sample(vel_noise, (num_resets, 3)), _sample(angvel_noise, (num_resets, 3))], dim=-1)
+
+    asset.write_root_pose_to_sim_index(root_pose=torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    asset.write_root_velocity_to_sim_index(root_velocity=velocities, env_ids=env_ids)
+
+
 def push_joints_by_velocity(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,

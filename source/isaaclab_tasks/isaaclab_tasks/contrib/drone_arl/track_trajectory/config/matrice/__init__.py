@@ -80,6 +80,18 @@ gym.register(
 )
 
 gym.register(
+    id="IsaacContrib-TrackTrajectory-Matrice-ChainsawAlign",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.chainsaw_align_env_cfg:MatriceChainsawAlignEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawAlignPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawAlignRNNPPORunnerCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
     id="IsaacContrib-TrackTrajectory-Matrice-ChainsawSwing",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

@@ -702,6 +702,9 @@ class DroneTrajectoryCommand(CommandTerm):
                 self._init_termination_flash()
             for visualizer in self._visualizers:
                 visualizer.set_visibility(True)
+            if not self.cfg.reference_debug_vis:
+                for visualizer in (self.goal_pose_visualizer, self.path_visualizer, self.lookahead_visualizer):
+                    visualizer.set_visibility(False)
         elif hasattr(self, "goal_pose_visualizer"):
             for visualizer in self._visualizers:
                 visualizer.set_visibility(False)
@@ -787,6 +790,12 @@ class DroneTrajectoryCommand(CommandTerm):
         n = self._num_vis_envs
         origins = self._env.scene.env_origins[:n]
 
+        # -- where an environment terminated early, held for a few steps so it is visible
+        if self.cfg.termination_flash_steps > 0:
+            self._update_termination_flash(n, origins)
+        if not self.cfg.reference_debug_vis:
+            return
+
         # -- moving target, oriented by the yaw reference so that it is visible too
         zeros = torch.zeros(n, device=self.device)
         self.goal_pose_visualizer.visualize(
@@ -803,7 +812,3 @@ class DroneTrajectoryCommand(CommandTerm):
             self._path_vis_points = (path + origins.unsqueeze(1)).reshape(-1, 3)
             self._path_vis_dirty = False
         self.path_visualizer.visualize(self._path_vis_points)
-
-        # -- where an environment terminated early, held for a few steps so it is visible
-        if self.cfg.termination_flash_steps > 0:
-            self._update_termination_flash(n, origins)
