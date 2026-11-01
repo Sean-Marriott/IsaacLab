@@ -87,3 +87,8 @@
 * Added the ``window_s`` parameter, and tracked-frame support through ``asset_cfg=None``, to
   :class:`~isaaclab_tasks.contrib.drone_arl.mdp.terminations.PositionErrorAboveMaximumAfterCapture`.
 * Added a recurrent PPO runner configuration for ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool``.
+* Added the ``fresh_env_fraction`` parameter of
+  :class:`~isaaclab_tasks.contrib.drone_arl.mdp.tensor_processors.DelayedObservationCfg`, which gives a
+  fraction of the environments the minimum lag with no held frames, the same ones for every term.
+* Added the :class:`~isaaclab_tasks.contrib.drone_arl.mdp.rewards.ActionSecondDifferenceL2` reward, which
+  penalizes an action that flips sign every policy step without resisting held or ramping commands.

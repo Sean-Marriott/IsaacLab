@@ -15,3 +15,6 @@
 * Changed ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool`` to delay the velocity command into
   the controller by 0-150 ms, drawn per episode, to cover the command latency of the DJI flight
   controller.
+* Changed ``IsaacContrib-TrackTrajectory-Matrice-ChainsawTool`` to give a quarter of the environments
+  fresh measured observations and to penalize the second difference of the action, against a 5 Hz
+  rocking of the airframe seen with fresh observations or a stiffer velocity loop.

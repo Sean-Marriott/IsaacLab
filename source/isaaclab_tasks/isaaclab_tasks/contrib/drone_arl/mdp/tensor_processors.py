@@ -30,6 +30,10 @@ class DelayedObservation(TensorProcessor):
     This process is causal: the lag for each environment can only increase by 1 each step, ensuring that the
     returned observation is never older than the previous step's lagged observation.
 
+    With ``fresh_env_fraction > 0``, that fraction of the environments always sees ``min_lag``, with no held
+    frames. They are the leading environment indices, so every term with this processor picks the same ones
+    and the whole observation of those environments is fresh at once.
+
     Unlike :attr:`~isaaclab.managers.ObservationTermCfg.delay_max_lag`, this processor runs before noise,
     clipping and scaling, and supports the multi-rate refresh and causal lag clamp described above.
 
@@ -68,6 +72,8 @@ class DelayedObservation(TensorProcessor):
             raise ValueError("DelayedObservation: update_period must be non-negative.")
         if cfg.update_period > 0 and cfg.update_period > cfg.max_lag:
             raise ValueError("DelayedObservation: update_period must be <= max_lag.")
+        if cfg.fresh_env_fraction < 0.0 or cfg.fresh_env_fraction > 1.0:
+            raise ValueError("DelayedObservation: fresh_env_fraction must be in [0, 1].")
 
         self._batch_size = data_dim[0]
         self._expand_1d = len(data_dim) == 1  # e.g., input shape (N,)
@@ -79,6 +85,8 @@ class DelayedObservation(TensorProcessor):
         self._prev_realized_lags: torch.Tensor | None = None  # [N]
         self._phases: torch.Tensor | None = None  # [N] if multi-rate
         self._step: int = 0
+        num_fresh = round(cfg.fresh_env_fraction * self._batch_size)
+        self._fresh_envs = torch.arange(self._batch_size, device=device) < num_fresh  # [N]
 
         # prefill buffer with zeros so early delays are valid
         self._prefill()
@@ -156,6 +164,7 @@ class DelayedObservation(TensorProcessor):
             realized_lags = torch.minimum(desired_lags, self._prev_realized_lags + 1)
 
         realized_lags = realized_lags.clamp(min=cfg.min_lag, max=cfg.max_lag)
+        realized_lags = torch.where(self._fresh_envs, cfg.min_lag, realized_lags)
         self._prev_realized_lags = realized_lags
 
         # return stale sample
@@ -205,4 +214,10 @@ class DelayedObservationCfg(TensorProcessorCfg):
     """Whether to use a separate phase for each environment when updating the lag.
 
     Only relevant if :attr:`update_period` is greater than 0. Defaults to True.
+    """
+
+    fresh_env_fraction: float = 0.0
+    """The fraction of environments that always see :attr:`min_lag`, with no held frames. Defaults to 0.0.
+
+    They are the leading environment indices, so all terms using this processor agree on them.
     """

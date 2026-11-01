@@ -38,12 +38,14 @@ from isaaclab_tasks.contrib.drone_arl.mdp.events import (
     reset_swing_by_amplitude,
 )
 from isaaclab_tasks.contrib.drone_arl.mdp.rewards import (
+    ActionSecondDifferenceL2,
     PayloadSwingEnergyExp,
     ToolEndTargetExp,
     position_tracking_exp,
     velocity_tracking_exp,
     yaw_tracking_exp,
 )
+from isaaclab_tasks.contrib.drone_arl.mdp.tensor_processors import DelayedObservationCfg
 from isaaclab_tasks.contrib.drone_arl.mdp.terminations import (
     PositionErrorAboveMaximumAfterCapture,
     tracked_position_error_above_maximum,
@@ -85,6 +87,14 @@ SWING_NATURAL_FREQUENCY = 3.0
 PLAY_SPEED_SCALE = 0.3
 """Factor on the reference's speed, acceleration and excursion in play mode. At 0.3 the hardest reference
 peaks at about 0.7 m/s and 0.9 m/s^2, against 2.25 m/s and 3.0 m/s^2 in training."""
+
+FRESH_OBS_ENV_FRACTION = 0.25
+"""Fraction of environments whose measured observations are always fresh: no lag and no held frames.
+
+The rest keep the 0-1 step lag with held frames. A policy trained only on that never sees a steady run of
+fresh frames, which is what a clean on-board estimate delivers, and on it rocks the airframe in a
+lightly damped 5 Hz (period-2) mode, with the velocity actions flipping sign every policy step.
+"""
 
 COMMAND_DELAY_RANGE_S = (0.0, 0.15)
 """Range of the delay between the policy's velocity command and the controller acting on it [s].
@@ -208,6 +218,17 @@ class ChainsawToolRewardsCfg:
     ang_vel_penalty = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.002)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
     action_magnitude = RewTerm(func=mdp.action_l2, weight=-0.0005)
+    # The policy rocks the airframe in a 5 Hz (period-2) mode, the velocity actions flipping sign every
+    # step, on fresh observations or the stiffer end of the K_vel range (see FRESH_OBS_ENV_FRACTION).
+    # action_rate above is far too weak to damp it (~2e-4 per step) and raising it would resist smooth
+    # tracking too; this term is zero for held or ramping commands. At the alternation seen in sim and
+    # on SITL (0.03-0.06 per axis) it costs about 0.05-0.15 per step, a few percent of the tracking
+    # reward; a policy that does not rock pays ~0.005.
+    # It is scored on the sampled action, so it also charges the exploration noise, 6 std^2 per axis
+    # per step. That is negligible when fine-tuning a trained policy (std 0.002-0.045 on the
+    # 2026-10-27 RNN checkpoint), but from scratch, at an initial std near 1, it would outweigh
+    # tracking roughly tenfold and collapse exploration: start it near zero or ramp it in.
+    action_second_difference = RewTerm(func=ActionSecondDifferenceL2, weight=-1.0)  # type: ignore[arg-type]
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-20.0)
 
     # -- end target
@@ -346,6 +367,17 @@ class MatriceChainsawToolTrajectoryEnvCfg(MatriceChainsawTrajectoryEnvCfg):
         # ChainsawToolEventCfg can then take a nonzero range, as the chainsaw task gives it.
         self.events.chainsaw_springs.params["stiffness"] = 1.0e4
         self.events.chainsaw_springs.params["scale_range"] = (1.0, 1.0)
+
+        # -- observation timing
+        # Some environments see the measured terms fresh, as a clean on-board estimate delivers them;
+        # see FRESH_OBS_ENV_FRACTION.
+        for term in vars(self.observations.policy).values():
+            processors = getattr(term, "tensor_processors", None)
+            if processors:
+                term.tensor_processors = [
+                    p.replace(fresh_env_fraction=FRESH_OBS_ENV_FRACTION) if isinstance(p, DelayedObservationCfg) else p
+                    for p in processors
+                ]
 
         # -- command latency
         # The DJI flight controller acts on a velocity command about 0.05-0.1 s after it arrives

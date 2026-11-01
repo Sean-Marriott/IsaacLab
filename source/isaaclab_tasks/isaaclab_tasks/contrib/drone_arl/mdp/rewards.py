@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import weakref
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -709,6 +710,38 @@ def yaw_tracking_exp(env: ManagerBasedRLEnv, std: float = 0.5, command_name: str
     _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
     yaw_error = math_utils.wrap_to_pi(command_term.command[:, 9] - yaw)
     return torch.exp(-(yaw_error**2) / std**2)
+
+
+class ActionSecondDifferenceL2(ManagerTermBase):
+    """Penalize the second difference of the action: ``||a_t - 2 a_{t-1} + a_{t-2}||^2``.
+
+    It is zero for a held or steadily ramping command and largest for one that flips sign every
+    policy step: an action alternating with amplitude ``a`` costs ``16 a^2`` per axis, against ``4 a^2``
+    from :func:`~isaaclab.envs.mdp.action_rate_l2`, which also charges smooth changes the same. It
+    therefore targets the period-2 (half the policy rate) oscillation without resisting tracking.
+    The first two steps of an episode, before there is a history, score zero. Use with a negative weight.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        dim = env.action_manager.total_action_dim
+        self._prev = torch.zeros(env.num_envs, dim, device=env.device)
+        self._prev_prev = torch.zeros(env.num_envs, dim, device=env.device)
+        self._history = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._history[env_ids] = 0
+
+    def __call__(self, env: ManagerBasedRLEnv) -> torch.Tensor:
+        action = env.action_manager.action
+        penalty = torch.sum(torch.square(action - 2.0 * self._prev + self._prev_prev), dim=1)
+        penalty = torch.where(self._history >= 2, penalty, torch.zeros_like(penalty))
+        self._prev_prev[:] = self._prev
+        self._prev[:] = action
+        self._history += 1
+        return penalty
 
 
 class ToolEndTargetExp(ManagerTermBase):
