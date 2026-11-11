@@ -32,12 +32,52 @@ def tool_goal_error_v(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor
     return math_utils.quat_apply_inverse(vehicle_quat_w, term.goal_error_w())
 
 
+def rolled_hang_offset(
+    robot: Articulation,
+    hang_offset: tuple[float, float, float],
+    env_ids: torch.Tensor | slice = slice(None),
+    roll_cfg: SceneEntityCfg | None = None,
+    roll_hang_shift: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> torch.Tensor:
+    """Tool position relative to the root with the payload hanging at rest, allowing for a rolled tool [m].
+
+    Rolling the tool by ``theta`` on the joint in ``roll_cfg`` moves it about the roll axis, which does not pass
+    through it, and shifts how the payload hangs. The offset is ``hang_offset`` plus
+    ``(sx * (1 - cos(theta)), sy * sin(theta), sz * (1 - cos(theta)))`` for ``roll_hang_shift = (sx, sy, sz)``:
+    a lever turning about the roll axis, which fits the measured rest pose of the Mk3 to within ~1 mm over the
+    joint's 0-90 deg. The roll is read from the joint, as the vehicle reads it from its encoder.
+
+    Args:
+        robot: The robot carrying the tool.
+        hang_offset: Tool position relative to the root with the robot level, the tool unrolled and the payload
+            hanging at rest, in the yaw-aligned vehicle frame [m].
+        env_ids: Environments to compute the offset for. Defaults to all.
+        roll_cfg: SceneEntityCfg naming the robot's tool-roll joint, resolved by the manager. None for no roll.
+        roll_hang_shift: Shift of the offset with the roll, as above [m].
+
+    Returns:
+        The offset in the yaw-aligned vehicle frame. Shape is (num_envs or len(env_ids), 3).
+    """
+    joint_pos = robot.data.joint_pos.torch[env_ids]
+    offset = torch.tensor(hang_offset, device=joint_pos.device).expand(joint_pos.shape[0], 3)
+    if roll_cfg is None:
+        return offset
+    roll = joint_pos[:, roll_cfg.joint_ids[0]]
+    lever = 1.0 - torch.cos(roll)
+    shift = torch.tensor(roll_hang_shift, device=joint_pos.device)
+    return offset + torch.stack((shift[0] * lever, shift[1] * torch.sin(roll), shift[2] * lever), dim=-1)
+
+
 def airframe_rest_error_v(
-    env: ManagerBasedRLEnv, command_name: str, hang_offset: tuple[float, float, float]
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    hang_offset: tuple[float, float, float],
+    roll_cfg: SceneEntityCfg | None = None,
+    roll_hang_shift: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> torch.Tensor:
     """Error of the airframe to where it rests with the tool on the current goal, in the vehicle frame [m].
 
-    The rest position is the goal minus ``hang_offset`` rotated by the airframe's current yaw: where the
+    The rest position is the goal minus the hang offset rotated by the airframe's current yaw: where the
     airframe would put the tool on the goal, at its current heading, with the payload hanging still. It is
     the collocated error for the velocity command, free of the swing that the tool's own error carries.
     Shape is (num_envs, 3).
@@ -45,12 +85,14 @@ def airframe_rest_error_v(
     Args:
         env: The environment instance.
         command_name: Name of the :class:`ToolPoseCommand` term.
-        hang_offset: Tool position relative to the root with the robot level and the payload hanging at
-            rest, in the yaw-aligned vehicle frame [m].
+        hang_offset: Tool position relative to the root with the robot level, the tool unrolled and the payload
+            hanging at rest, in the yaw-aligned vehicle frame [m].
+        roll_cfg: The tool-roll joint, if the tool can be rolled (see :func:`rolled_hang_offset`).
+        roll_hang_shift: Shift of the hang offset with the roll [m] (see :func:`rolled_hang_offset`).
     """
     term: ToolPoseCommand = env.command_manager.get_term(command_name)
     vehicle_quat_w = math_utils.yaw_quat(term.robot.data.root_link_quat_w.torch)
-    hang_offset_v = torch.tensor(hang_offset, device=env.device).expand(env.num_envs, 3)
+    hang_offset_v = rolled_hang_offset(term.robot, hang_offset, roll_cfg=roll_cfg, roll_hang_shift=roll_hang_shift)
     rest_pos_w = term.goal_pos_w - math_utils.quat_apply(vehicle_quat_w, hang_offset_v)
     return math_utils.quat_apply_inverse(vehicle_quat_w, rest_pos_w - term.robot.data.root_link_pos_w.torch)
 

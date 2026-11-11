@@ -78,3 +78,24 @@ class ChainsawAlignRNNPPORunnerCfg(ChainsawAlignPPORunnerCfg):
         rnn_hidden_dim=256,
         rnn_num_layers=1,
     )
+
+
+@configclass
+class ChainsawAlignBranchPPORunnerCfg(ChainsawAlignPPORunnerCfg):
+    """PPO configuration for seating a physical branch, logged to its own folder.
+
+    The policy observations are those of the base task, so a base-task checkpoint loads for fine-tuning.
+    """
+
+    experiment_name = "matrice_chainsaw_align_branch"
+
+
+@configclass
+class ChainsawAlignBranchRNNPPORunnerCfg(ChainsawAlignRNNPPORunnerCfg):
+    """Recurrent PPO configuration for seating a physical branch, logged to its own folder.
+
+    The GRU matters more here than in the base task: the policy has no contact sensing, so it has to tell the
+    branch's push from swing and wind by the payload's and airframe's recent response.
+    """
+
+    experiment_name = "matrice_chainsaw_align_branch_rnn"

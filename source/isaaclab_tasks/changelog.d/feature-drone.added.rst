@@ -150,3 +150,31 @@
   gusts; and
   :func:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.lock_passive_joints`, which locks the saw-head
   pivot at its rest pose.
+* Added sim-to-real terms to ``IsaacContrib-ChainsawAlign-Matrice``: a 0-0.15 s velocity command delay, up to
+  one policy step of lag on the estimated observations (always fresh in a quarter of the environments), and
+  startup randomization of the tube-hinge damping and the saw mass.
+* Added approach aborts to :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.ToolPoseCommand`: a staged
+  tool that leaves the approach corridor (``abort_max_cross_track``, ``abort_max_yaw_error``,
+  ``abort_max_overshoot``, ``abort_on_back_out``) is unstaged, so the goal returns to the staging point for
+  another try, and the number of retries is logged. The corridor is drawn as four rods along the approach axis,
+  grey while unstaged, blue while staged and red just after an abort.
+* Added ``IsaacContrib-ChainsawAlignBranch-Matrice``, the chainsaw alignment task with the target made a rigid,
+  fixed branch of 10-50 mm diameter, drawn per episode and placed so that, seated in the Mk3's mouth pocket, it puts
+  the mouth on the target pose. Hard contact between the saw and the branch is penalized, contact between the
+  branch and the rest of the vehicle ends the episode, and the policy observations are unchanged, so it feels the
+  branch only through the payload and airframe. Added
+  :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.RandomBranch` to place the branch, and a keep-out
+  box to :func:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.reset_tool_around_target`. The branch is
+  turned to any heading, with the target turned to match, and slopes across the approach by up to 90 deg, ramped
+  in by the curriculum, with the saw head rolled to the slope at spawn and held there. A steep branch ends 0.8 m
+  above the cut, so it stays clear of the rotors. Added
+  :func:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.rolled_hang_offset`, and ``roll_cfg`` and
+  ``roll_hang_shift`` parameters on ``airframe_rest_error_v`` and ``reset_tool_around_target``, so the
+  airframe-rest observation and the spawn follow how the saw roll moves the hanging mouth. Added
+  :meth:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.ToolPoseCommand.set_target_yaw`, so a reset event
+  can turn the target.
+* Added occasional strong horizontal wind bursts to
+  :class:`~isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp.RandomWind` (``burst_force_range``,
+  ``burst_duration_range_s``, ``burst_interval_range_s``), off by default. The chainsaw alignment tasks turn them on
+  in play mode, at 20-30 N for 1-2 s about once per episode, so an evaluation shows the policy thrown out of the
+  approach corridor and staging again.

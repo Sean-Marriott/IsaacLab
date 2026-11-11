@@ -18,8 +18,10 @@ the success rate: first it widens the spawns from behind the target to all the w
 in wind gusts on the airframe. The policy commands airframe velocities and yaw rate through the Lee velocity
 controller.
 
-This is a deliberately minimal base with no domain randomization, observation delay or command delay. Add
-those on top once the base task trains.
+For transfer to the real vehicle, the velocity command reaches the controller up to
+:data:`COMMAND_DELAY_RANGE_S` late, the estimated observations lag by up to a policy step, and the payload's
+hinge damping and saw mass are randomized at startup. The payload's rest pose is not randomized, so the
+hang offset the observations and spawns use stays exact.
 """
 
 import math
@@ -46,9 +48,11 @@ from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 from isaaclab_contrib.assets import MultirotorCfg
 from isaaclab_contrib.controllers import LeeVelControllerCfg
 
-from isaaclab_assets.robots.arl_robot_1 import MATRICE_MK3_CFG
-
 import isaaclab_tasks.contrib.drone_arl.chainsaw_align.mdp as mdp
+from isaaclab_tasks.contrib.drone_arl.mdp.events import RandomizePassiveJointDamping
+from isaaclab_tasks.contrib.drone_arl.mdp.tensor_processors import DelayedObservationCfg
+
+from isaaclab_assets.robots.arl_robot_1 import MATRICE_MK3_CFG
 
 EPISODE_LENGTH_S = 20.0
 COMMAND_NAME = "tool_pose"
@@ -64,6 +68,9 @@ TOOL_BODY_NAME = "roll_link"
 PAYLOAD_JOINT_NAMES = ["csTubePitch", "csTubeRoll", "root_joint"]
 """Passive payload joints: the two-axis tube hinge at the airframe and the saw-head pitch at the tube end.
 All are zero at the hanging rest pose."""
+
+TUBE_HINGE_JOINT_NAMES = ["csTubePitch", "csTubeRoll"]
+"""The two-axis tube hinge at the airframe, about which the payload swings."""
 
 SAW_HEAD_JOINT_NAME = "root_joint"
 """The saw-head pitch joint at the bottom of the tube, locked at rest by EventCfg.lock_saw_head. It stays
@@ -97,6 +104,46 @@ along the tool +x axis, which the mouth pocket opens towards."""
 STAGING_DISTANCE = 0.5
 """Distance of the staging point behind the target [m]."""
 
+PLAY_BURST_FORCE_RANGE = (20.0, 30.0)
+"""Magnitude of the occasional strong wind bursts in play mode [N]: 2.2-3.3 m/s^2 on the 9.1 kg vehicle, ten times
+the curriculum's largest gust. Strong enough to throw the mouth out of the approach corridor, so an evaluation shows
+the policy recover and stage again. Off in training."""
+
+PLAY_BURST_DURATION_S = (1.0, 2.0)
+"""Time each play-mode burst lasts [s]."""
+
+PLAY_BURST_INTERVAL_S = (8.0, 14.0)
+"""Quiet time before each play-mode burst [s]: the first comes 8-14 s into the 20 s episode, mostly after the mouth
+has arrived on the target and with time left to stage again; a second rarely fits."""
+
+COMMAND_DELAY_RANGE_S = (0.0, 0.15)
+"""Range of the delay between the policy's velocity command and the controller acting on it [s].
+
+The DJI flight controller acts on a command about 0.05-0.1 s after it arrives (fitted from M350 flights). In
+the chainsaw tool trajectory task, a policy trained without a delay doubled its swing at 0.1 s and failed at
+0.15 s. The range covers the fitted delay with margin and goes down to none, so the policy does not come to
+rely on a fixed lag. Drawn per environment on every reset.
+"""
+
+FRESH_OBS_ENV_FRACTION = 0.25
+"""Fraction of environments whose measured observations are always fresh: no lag and no held frames.
+
+A policy trained only on lagged, held frames rocked the airframe in a 5 Hz mode on a steady run of fresh ones
+(in the chainsaw tool trajectory task), which is what a clean on-board estimate delivers.
+"""
+
+MEASUREMENT_DELAY = DelayedObservationCfg(
+    min_lag=0,
+    max_lag=1,
+    per_env=True,
+    hold_prob=0.5,
+    update_period=1,
+    per_env_phase=True,
+    fresh_env_fraction=FRESH_OBS_ENV_FRACTION,
+)
+"""Lag of the terms the vehicle has to estimate: up to one 0.1 s policy step, with repeated frames. As in the
+trajectory tasks."""
+
 
 ##
 # Scene definition
@@ -129,7 +176,9 @@ class CommandsCfg:
 
     # Staged at STAGING_DISTANCE behind the target: within 0.1 m, under 0.3 m/s and within 15 deg of the
     # target yaw. Success: within 5 cm, under 0.1 m/s, within 10 deg, having come in within 20 deg of the
-    # approach axis (see the command config for the defaults).
+    # approach axis. A staged approach is aborted for another try if the mouth gets more than 0.2 m off the
+    # axis, 30 deg off the target yaw, 0.1 m past the target, or backs out beyond the staging point (see the
+    # command config for the defaults).
     tool_pose = mdp.ToolPoseCommandCfg(
         asset_name="robot",
         body_name=TOOL_BODY_NAME,
@@ -169,6 +218,7 @@ class ActionsCfg:
         # Alignment is a slow, precise manoeuvre; a small range gives the policy finer resolution.
         max_velocity=1.0,
         max_yaw_rate=math.pi / 4.0,
+        command_delay_range_s=COMMAND_DELAY_RANGE_S,
     )
 
 
@@ -178,7 +228,11 @@ class ObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for the policy group."""
+        """Observations for the policy group.
+
+        Every term built from the vehicle's state estimate or encoders lags by up to a policy step (see
+        :data:`MEASUREMENT_DELAY`). The staging flag and the last action are known exactly and are not delayed.
+        """
 
         # -- task
         # Error to the current goal (the staging point, then the target), in the vehicle frame: what the
@@ -187,18 +241,21 @@ class ObservationsCfg:
             func=mdp.tool_goal_error_v,
             params={"command_name": COMMAND_NAME},
             noise=Unoise(n_min=-0.02, n_max=0.02),
+            tensor_processors=[MEASUREMENT_DELAY],
         )
         # The mouth relative to the target in the target's frame: where it is relative to the approach axis.
         tool_offset = ObsTerm(
             func=mdp.tool_offset_t,
             params={"command_name": COMMAND_NAME},
             noise=Unoise(n_min=-0.02, n_max=0.02),
+            tensor_processors=[MEASUREMENT_DELAY],
         )
         staged = ObsTerm(func=mdp.tool_staged, params={"command_name": COMMAND_NAME})
         tool_yaw_error = ObsTerm(
             func=mdp.tool_yaw_error_sin_cos,
             params={"command_name": COMMAND_NAME},
             noise=Gnoise(mean=0.0, std=0.01),
+            tensor_processors=[MEASUREMENT_DELAY],
         )
         # -- airframe
         # Error of the airframe to where it rests with the mouth on the current goal, at its current heading.
@@ -209,20 +266,29 @@ class ObservationsCfg:
             func=mdp.airframe_rest_error_v,
             params={"command_name": COMMAND_NAME, "hang_offset": MOUTH_HANG_OFFSET},
             noise=Unoise(n_min=-0.02, n_max=0.02),
+            tensor_processors=[MEASUREMENT_DELAY],
         )
-        lin_vel =ObsTerm(func=mdp.root_lin_vel_v, noise=Unoise(n_min=-0.05, n_max=0.05))
-        ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.05, n_max=0.05))
-        roll_pitch = ObsTerm(func=mdp.root_roll_pitch, noise=Gnoise(mean=0.0, std=0.01))
+        lin_vel = ObsTerm(
+            func=mdp.root_lin_vel_v, noise=Unoise(n_min=-0.05, n_max=0.05), tensor_processors=[MEASUREMENT_DELAY]
+        )
+        ang_vel = ObsTerm(
+            func=mdp.base_ang_vel, noise=Unoise(n_min=-0.05, n_max=0.05), tensor_processors=[MEASUREMENT_DELAY]
+        )
+        roll_pitch = ObsTerm(
+            func=mdp.root_roll_pitch, noise=Gnoise(mean=0.0, std=0.01), tensor_processors=[MEASUREMENT_DELAY]
+        )
         # -- payload swing, from the hinge encoders
         payload_joint_pos = ObsTerm(
             func=mdp.joint_pos_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=PAYLOAD_JOINT_NAMES)},
             noise=Gnoise(mean=0.0, std=0.0175),  # ~1 deg
+            tensor_processors=[MEASUREMENT_DELAY],
         )
         payload_joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=PAYLOAD_JOINT_NAMES)},
             noise=Gnoise(mean=0.0, std=0.035),  # ~2 deg/s
+            tensor_processors=[MEASUREMENT_DELAY],
         )
         last_action = ObsTerm(func=mdp.last_action)
 
@@ -246,6 +312,31 @@ class EventCfg:
         func=mdp.lock_passive_joints,
         mode="startup",
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[SAW_HEAD_JOINT_NAME]), "stiffness": 1.0e4},
+    )
+
+    # The tube-hinge damping sets how fast a swing dies out. It is identified from one free hang-and-release
+    # take, so the policy should not rely on one exact decay rate. Sampled log-uniformly per hinge axis.
+    randomize_hinge_damping = EventTerm(
+        func=RandomizePassiveJointDamping,  # type: ignore[arg-type]
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=TUBE_HINGE_JOINT_NAMES),
+            "scale_range": (0.5, 2.0),
+        },
+    )
+
+    # The saw is ~1.9 kg of the ~2 kg payload, and its mass varies with fuel, chain and battery. Only its mass
+    # is randomized, not its COM, which sets the hanging pose MOUTH_HANG_OFFSET was measured in. The Lee
+    # controller keeps the nominal mass it cached before the startup events, so this is also a model mismatch.
+    randomize_saw_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=[TOOL_BODY_NAME]),
+            "mass_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "recompute_inertia": True,
+        },
     )
 
     # -- reset
@@ -303,7 +394,10 @@ class RewardsCfg:
     The position kernels are on the remaining route length D: through the staging point until the mouth is
     staged, then straight to the target. D never increases at the switch, so reaching the staging point never
     costs reward, and the fine kernel can only be earned on the target after a staged arrival. A swinging
-    payload carries the mouth with it, so the fine kernel also asks for the swing to be damped.
+    payload carries the mouth with it, so the fine kernel also asks for the swing to be damped. An aborted
+    approach puts the route back through the staging point, so D jumps up (from ~0.2 m to ~1 m near the
+    target) and the route and cross-track terms lose about 1 per step until the mouth is staged again: losing
+    the alignment costs reward with no penalty term of its own, and the way back to it is another try.
     """
 
     # -- route (wide: 0.11 at D = 3 m, the furthest spawn; mid: 0.37 at the staging point; fine: target only)
@@ -311,9 +405,7 @@ class RewardsCfg:
     route_mid = RewTerm(func=mdp.tool_route_exp, weight=1.0, params={"std": 0.5, "command_name": COMMAND_NAME})
     route_fine = RewTerm(func=mdp.tool_route_exp, weight=1.0, params={"std": 0.15, "command_name": COMMAND_NAME})
     # -- final feed on the approach axis (paid only once staged; 0.37 at 10 cm off the axis)
-    cross_track = RewTerm(
-        func=mdp.tool_cross_track_exp, weight=0.5, params={"std": 0.1, "command_name": COMMAND_NAME}
-    )
+    cross_track = RewTerm(func=mdp.tool_cross_track_exp, weight=0.5, params={"std": 0.1, "command_name": COMMAND_NAME})
     # -- holding still on the target
     # The position kernels are flat near the target. Kicking a ~5 cm swing into a mouth held on the target by a
     # scripted controller cut route_fine only from 0.97 to 0.95, but this term from 0.79 to 0.54. It pays only
@@ -398,7 +490,8 @@ class MatriceChainsawAlignEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.robot.actuators["thrusters"].dt = self.sim.dt
 
     def play_mode(self):
-        """Evaluation overrides: few environments, no observation noise, spawned at rest, at full difficulty."""
+        """Evaluation overrides: few environments, no observation noise, spawned at rest, at full difficulty, with
+        occasional strong wind bursts."""
         super().play_mode()
         self.scene.env_spacing = 10.0
         # Every curriculum ramp at its end value, rather than wherever a training level happens to be.
@@ -409,3 +502,7 @@ class MatriceChainsawAlignEnvCfg(ManagerBasedRLEnvCfg):
         self.curriculum.difficulty = None
         self.events.reset_base.params["lin_vel_range"] = (0.0, 0.0)
         self.events.reset_base.params["ang_vel_range"] = (0.0, 0.0)
+        # Occasional strong bursts on top of the gusts, to show the policy thrown off and staging again.
+        self.events.wind.params["burst_force_range"] = PLAY_BURST_FORCE_RANGE
+        self.events.wind.params["burst_duration_range_s"] = PLAY_BURST_DURATION_S
+        self.events.wind.params["burst_interval_range_s"] = PLAY_BURST_INTERVAL_S

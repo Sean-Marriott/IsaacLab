@@ -23,7 +23,8 @@ class ToolPoseCommandCfg(CommandTermCfg):
 
     The tool first has to reach a staging point ``staging_distance`` along ``approach_axis`` from the target,
     slow and square to it. Only then does the goal switch to the target itself, so the tool arrives along the
-    approach axis.
+    approach axis. If the tool then leaves the approach corridor (see the ``abort_*`` parameters), the approach
+    is aborted and the goal returns to the staging point for another try.
     """
 
     class_type: type["ToolPoseCommand"] | str = "{DIR}.tool_pose_command:ToolPoseCommand"
@@ -64,6 +65,25 @@ class ToolPoseCommandCfg(CommandTermCfg):
 
     staging_max_yaw_error: float = math.radians(15.0)
     """Largest tool yaw error at which the tool counts as staged [rad]."""
+
+    abort_max_cross_track: float = 0.2
+    """Largest distance of a staged tool from the approach axis before the approach is aborted [m].
+
+    Each abort threshold is wider than the matching staging one, so the staged flag cannot flicker at the edge.
+    Set an abort threshold to ``math.inf`` to disable it.
+    """
+
+    abort_max_yaw_error: float = math.radians(30.0)
+    """Largest yaw error of a staged tool before the approach is aborted [rad]."""
+
+    abort_max_overshoot: float = 0.1
+    """Largest distance a staged tool may pass beyond the target along the approach axis before the approach is
+    aborted [m]."""
+
+    abort_on_back_out: bool = True
+    """Whether a staged tool that backs out along the approach axis beyond the staging region (more than
+    :attr:`staging_distance` plus :attr:`staging_radius` behind the target) aborts the approach, so the policy
+    can retry by backing straight out."""
 
     success_radius: float = 0.05
     """Distance from the target within which the tool can count as a success [m]."""
@@ -113,6 +133,39 @@ class ToolPoseCommandCfg(CommandTermCfg):
     )
     """Marker for the approach: a thin rail along the approach axis from the staging point to the target. Unit
     length; scaled at runtime to :attr:`staging_distance`."""
+
+    corridor_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/Command/tool_corridor",
+        markers={
+            "idle": sim_utils.CylinderCfg(
+                radius=0.005,
+                height=1.0,
+                axis="Z",
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
+            ),
+            "armed": sim_utils.CylinderCfg(
+                radius=0.005,
+                height=1.0,
+                axis="Z",
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.5, 1.0)),
+            ),
+            "aborted": sim_utils.CylinderCfg(
+                radius=0.008,
+                height=1.0,
+                axis="Z",
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.1, 0.1)),
+            ),
+        },
+    )
+    """Marker for the abort corridor: four thin rods parallel to the approach axis, left, right, above and below it
+    at :attr:`abort_max_cross_track`, from :attr:`abort_max_overshoot` past the target to the back of the staging
+    region. Grey while the tool is not staged, blue while it is (the corridor is armed), and red for
+    :attr:`abort_vis_hold_s` after an abort. Rods rather than a translucent tube, because the viewport renders
+    marker opacity as solid, which would hide the other markers. The yaw limit is not drawn. Not drawn if the
+    cross-track or overshoot limit is infinite. Unit length; scaled at runtime."""
+
+    abort_vis_hold_s: float = 1.0
+    """Time the corridor marker stays red after an abort [s]."""
 
     tool_visualizer_cfg: VisualizationMarkersCfg = replace(FRAME_MARKER_CFG, prim_path="/Visuals/Command/tool_pose")
     """Marker for the current tool pose."""

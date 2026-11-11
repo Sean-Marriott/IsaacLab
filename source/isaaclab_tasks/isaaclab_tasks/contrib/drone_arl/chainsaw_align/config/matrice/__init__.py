@@ -21,3 +21,14 @@ gym.register(
         "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawAlignRNNPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="IsaacContrib-ChainsawAlignBranch-Matrice",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.chainsaw_align_branch_env_cfg:MatriceChainsawAlignBranchEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawAlignBranchPPORunnerCfg",
+        "rsl_rl_rnn_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ChainsawAlignBranchRNNPPORunnerCfg",
+    },
+)
